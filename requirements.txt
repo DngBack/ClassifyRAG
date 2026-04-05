@@ -5,7 +5,7 @@
 pymupdf>=1.24.0
 Pillow>=10.0.0
 # Optional: for classify_pdf --ocr on scanned PDFs, install system Tesseract (e.g. apt install tesseract-ocr tesseract-ocr-vie tesseract-ocr-eng).
-# Optional: classify_pdf --vlm-keywords downloads a vision model from Hugging Face (default Qwen2-VL-2B); GPU recommended.
+# Optional: classify_pdf --vlm-keywords downloads a vision model from Hugging Face (default Qwen3-VL-4B); GPU recommended.
 
 numpy>=1.24.0
 einops>=0.7.0

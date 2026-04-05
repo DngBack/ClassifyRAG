@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+from classifyrag.characteristic_text import apply_characteristic_text
 from classifyrag.colsmol_scorer import classify_page, load_index, load_model
 from classifyrag.llm_keywords import DEFAULT_VLM_MODEL, keywords_from_image_vlm
 from classifyrag.pdf_pages import iter_pdf_pages
@@ -19,6 +20,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--format", choices=("csv", "json"), default="csv")
     p.add_argument("--w-img", type=float, default=0.7, help="Weight for image branch (text gets 1-w).")
     p.add_argument("--dpi", type=float, default=144.0)
+    p.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Only classify the first N pages (0-based: pages 0..N-1). Default: all pages.",
+    )
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--device", type=str, default=None)
     p.add_argument(
@@ -36,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--vlm-keywords",
         action="store_true",
-        help="When page has no usable text (typical for scans), run a vision LLM on the page image to produce keywords for ColSmol's text branch (default model: Qwen2-VL-2B).",
+        help="When page has no usable text (typical for scans), run a vision LLM on the page image to produce keywords for ColSmol's text branch (see --vlm-model).",
     )
     p.add_argument("--vlm-model", type=str, default=DEFAULT_VLM_MODEL, help="Hugging Face model id for VLM keywords.")
     p.add_argument("--vlm-device", type=str, default=None, help="Device for VLM (default: same as CUDA if available else cpu).")
@@ -45,6 +53,12 @@ def main(argv: list[str] | None = None) -> int:
         "--vlm-always",
         action="store_true",
         help="Always replace page text with VLM keywords (slow; ignores existing OCR/text).",
+    )
+    p.add_argument(
+        "--characteristic-text",
+        action="store_true",
+        help="Use only titles and field labels for the text branch (strip values after ':'). "
+        "Match the index built with the same flag.",
     )
     args = p.parse_args(argv)
 
@@ -67,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         ocr_dpi=args.ocr_dpi,
         ocr_language=args.ocr_lang,
     ):
+        if args.max_pages is not None and page.page_index >= args.max_pages:
+            break
         query_text = page.text
         query_text_kind = "page_text" if page.text.strip() else "empty"
         vlm_snippet = ""
@@ -91,6 +107,13 @@ def main(argv: list[str] | None = None) -> int:
                 elif not query_text.strip():
                     query_text_kind = "empty"
 
+        query_text = apply_characteristic_text(query_text, args.characteristic_text)
+        if args.characteristic_text and query_text.strip():
+            if query_text_kind == "page_text":
+                query_text_kind = "characteristic_text"
+            elif query_text_kind == "vlm_keywords":
+                query_text_kind = "vlm_keywords_characteristic"
+
         pred, fused, sim_img, sim_txt = classify_page(
             processor=processor,
             device=device,
@@ -101,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             model=model,
             w_img=args.w_img,
             batch_size=args.batch_size,
+            proto_text_embs=idx.text_embs,
         )
         row = {
             "page_index": page.page_index,

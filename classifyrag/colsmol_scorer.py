@@ -21,6 +21,8 @@ class PrototypeIndex:
     model_id: str
     manifest: list[dict[str, Any]]
     image_embs: list[torch.Tensor]
+    #: Parallel to ``image_embs`` / manifest; used for the text branch vs text prototypes (optional).
+    text_embs: Optional[list[Optional[torch.Tensor]]] = None
 
 
 def truncate_text(text: str, max_chars: int = DEFAULT_TEXT_CHARS) -> str:
@@ -120,14 +122,14 @@ def maxsim_vs_prototypes(
 def scores_per_label(
     processor: ColIdefics3Processor,
     query_emb: torch.Tensor,
-    proto_embs: list[torch.Tensor],
+    proto_embs: list[Optional[torch.Tensor]],
     proto_labels: list[str],
     labels: Iterable[str],
     device: str,
 ) -> dict[str, float]:
     out: dict[str, float] = {}
     for lab in labels:
-        ps = [e for e, lb in zip(proto_embs, proto_labels, strict=True) if lb == lab]
+        ps = [e for e, lb in zip(proto_embs, proto_labels, strict=True) if lb == lab and e is not None]
         out[lab] = maxsim_vs_prototypes(processor, query_emb, ps, device=device)
     return out
 
@@ -157,9 +159,14 @@ def classify_page(
     w_img: float = 0.7,
     text_max_chars: int = DEFAULT_TEXT_CHARS,
     batch_size: int = 4,
+    proto_text_embs: Optional[list[Optional[torch.Tensor]]] = None,
 ) -> tuple[str, dict[str, float], dict[str, float], dict[str, float]]:
     """
     Returns predicted label, fused scores, raw image scores, raw text scores (or empty).
+
+    If ``proto_text_embs`` is set (from an index built with text prototypes), the text
+    branch scores the query text against those embeddings; otherwise it uses image
+    prototypes (legacy / ColSmol cross-modal text→image).
     """
     q_img = embed_images(model, processor, [query_image], device=device, batch_size=batch_size)[0]
     t = truncate_text(query_text, text_max_chars)
@@ -171,8 +178,9 @@ def classify_page(
     )
     sim_txt: Optional[dict[str, float]] = None
     if q_txt is not None:
+        proto_for_txt = proto_text_embs if proto_text_embs is not None else proto_embs
         sim_txt = scores_per_label(
-            processor, q_txt, proto_embs, proto_labels, ORDERED_LABELS, device=device
+            processor, q_txt, proto_for_txt, proto_labels, ORDERED_LABELS, device=device
         )
 
     fused = fuse_image_text_scores(sim_img, sim_txt, w_img=w_img if q_txt is not None else 1.0)
@@ -180,10 +188,19 @@ def classify_page(
     return pred, fused, sim_img, sim_txt or {}
 
 
-def save_index(path: str | Path, model_id: str, manifest: list[dict[str, Any]], image_embs: list[torch.Tensor]) -> None:
+def save_index(
+    path: str | Path,
+    model_id: str,
+    manifest: list[dict[str, Any]],
+    image_embs: list[torch.Tensor],
+    text_embs: Optional[list[Optional[torch.Tensor]]] = None,
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model_id": model_id, "manifest": manifest, "image_embs": image_embs}, path)
+    payload: dict[str, Any] = {"model_id": model_id, "manifest": manifest, "image_embs": image_embs}
+    if text_embs is not None:
+        payload["text_embs"] = text_embs
+    torch.save(payload, path)
 
 
 def load_index(path: str | Path) -> PrototypeIndex:
@@ -193,6 +210,7 @@ def load_index(path: str | Path) -> PrototypeIndex:
         model_id=blob["model_id"],
         manifest=blob["manifest"],
         image_embs=blob["image_embs"],
+        text_embs=blob.get("text_embs"),
     )
 
 
