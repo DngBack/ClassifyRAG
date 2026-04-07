@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--output", type=Path, default=None, help="Write CSV or JSON (from --format). Default: print table only.")
     p.add_argument("--format", choices=("csv", "json"), default="csv")
     p.add_argument("--max-pages", type=int, default=50, help="Only first N pages (default 50).")
-    p.add_argument("--threshold", type=float, default=0.95, help="Blank if cosine01 >= this (default 0.95).")
+    p.add_argument("--threshold", type=float, default=0.85, help="Blank if cosine01 >= this (default 0.85).")
     p.add_argument("--dpi", type=float, default=144.0)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--device", type=str, default=None)

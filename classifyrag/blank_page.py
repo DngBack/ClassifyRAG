@@ -8,7 +8,7 @@ from typing import Any, Optional
 import torch
 from PIL import Image
 
-from colpali_engine.models import ColIdefics3, ColIdefics3Processor
+from colpali_engine.models import ColQwen3_5, ColQwen3_5Processor
 
 from classifyrag.colsmol_scorer import DEFAULT_MODEL_ID, embed_images, load_model, maxsim_vs_prototypes
 
@@ -17,7 +17,7 @@ BLANK_INDEX_VERSION = 1
 
 @dataclass
 class BlankPageIndex:
-    """ColSmol image embeddings for blank-page reference samples."""
+    """ColQwen3.5 image embeddings for blank-page reference samples."""
 
     model_id: str
     manifest: list[dict[str, Any]]
@@ -71,8 +71,8 @@ def blank_scores(
     """
     Returns (cosine_01, raw_maxsim).
 
-    ``cosine_01`` is in [0, 1] (mean-pooled cosine mapped); suitable for thresholds like 0.95.
-    ``raw_maxsim`` is the ColSmol late-interaction score (unbounded; for diagnostics).
+    ``cosine_01`` is in [0, 1] (mean-pooled cosine mapped); tune threshold (default 0.85 in ``is_blank_page``).
+    ``raw_maxsim`` is the late-interaction MaxSim score (unbounded; for diagnostics).
     """
     cos = max_mean_cosine_vs_prototypes(query_emb, blank_embs)
     cos01 = cosine01(cos)
@@ -86,14 +86,14 @@ def is_blank_page(
     query_emb: torch.Tensor,
     blank_embs: list[torch.Tensor],
     *,
-    threshold: float = 0.95,
+    threshold: float = 0.85,
     use_maxsim: bool = False,
     maxsim_threshold: Optional[float] = None,
 ) -> tuple[bool, float, float]:
     """
     Decide if a page matches blank references.
 
-    By default uses mean-pooled cosine mapped to [0,1] (``threshold`` default 0.95).
+    By default uses mean-pooled cosine mapped to [0,1] (``threshold`` default 0.85).
     If ``use_maxsim`` is True, uses raw MaxSim instead (set ``maxsim_threshold``; ``threshold`` ignored).
     """
     cos01, maxsim = blank_scores(processor, device, query_emb, blank_embs)
@@ -135,8 +135,8 @@ def save_blank_manifest_json(path: str | Path, manifest: list[dict[str, Any]]) -
 def score_blank_for_image(
     image: Image.Image,
     *,
-    model: ColIdefics3,
-    processor: ColIdefics3Processor,
+    model: ColQwen3_5,
+    processor: ColQwen3_5Processor,
     device: str,
     blank_index: BlankPageIndex,
     batch_size: int = 4,

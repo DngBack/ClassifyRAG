@@ -17,6 +17,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--samples-dir", type=Path, default=Path("data/Sample_document"))
     p.add_argument("--index", type=Path, default=Path("data/index/prototypes.pt"))
     p.add_argument("--w-img", type=float, default=0.7)
+    p.add_argument(
+        "--mode",
+        choices=("image", "fused"),
+        default="image",
+        help="Match classify_pdf: image or fused (text+VLM path not used in batch eval).",
+    )
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--ocr", action="store_true")
     p.add_argument("--ocr-dpi", type=int, default=150)
@@ -46,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             ocr_language=args.ocr_lang,
         ):
             qtext = apply_characteristic_text(page.text, args.characteristic_text)
-            pred, _, _, _ = classify_page(
+            pred, _, _, _, _, _, _ = classify_page(
                 processor=processor,
                 device=device,
                 query_image=page.image,
@@ -56,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
                 model=model,
                 w_img=args.w_img,
                 proto_text_embs=idx.text_embs,
+                pred_from=args.mode,
             )
             total_pages += 1
             if pred == exp:

@@ -2,7 +2,7 @@
 Vision-language keyword extraction for scanned PDF pages.
 
 When OCR / text layer is empty, a vision LLM (default: Qwen3-VL-4B-Instruct) reads the
-page image and outputs a comma-separated keyword string for ColSmol's text query path.
+page image and outputs a comma-separated keyword string for the retriever text query path.
 Text-only LLMs cannot replace this step for image-only pages.
 """
 

@@ -36,7 +36,7 @@ def extract_characteristic_labels(text: str, *, max_phrases: int = 64) -> str:
     - Numbered lines: strip ``N. `` then take the part before the first ``:`` if present,
       else the whole line (e.g. document title).
     - Deduplicate while preserving order (case-insensitive).
-    - Result is comma-separated for ColSmol query/prototype text.
+    - Result is comma-separated for retriever query/prototype text.
     """
     if not (text and text.strip()):
         return ""

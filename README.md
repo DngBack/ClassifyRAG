@@ -1,6 +1,6 @@
 # ClassifyRAG
 
-Phân loại trang PDF bằng **ColSmol** (ColIdefics3, mặc định `vidore/colSmol-256M`): so khớp ảnh trang và (tuỳ chọn) nhánh văn bản với **chỉ mẫu (prototype)** đã index. Repo cũng hỗ trợ **phát hiện trang trắng / không có nội dung chữ** dựa trên ảnh tham chiếu trong `data/blank_data`.
+Phân loại trang PDF bằng **ColQwen3.5** (mặc định `athrael-soju/colqwen3.5-4.5B-v3`): so khớp ảnh trang và (tuỳ chọn) nhánh văn bản với **chỉ mẫu (prototype)** đã index. Repo cũng hỗ trợ **phát hiện trang trắng / không có nội dung chữ** dựa trên ảnh tham chiếu trong `data/blank_data`.
 
 ## Cài đặt
 
@@ -10,7 +10,7 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-- **GPU** khuyến nghị cho ColSmol.
+- **GPU** khuyến nghị cho ColQwen3.5 (khoảng ~4.5B tham số).
 - **OCR (Tesseract)** tùy chọn: cần khi PDF scan không có lớp text (`classify_pdf --ocr`, `eval_blank_pdf --gt-ocr`). Ví dụ Ubuntu: `sudo apt install tesseract-ocr tesseract-ocr-vie tesseract-ocr-eng`.
 
 ## Tính năng tổng quan
@@ -25,7 +25,7 @@ pip install -r requirements.txt
 
 ---
 
-## 1. Phân loại tài liệu (ColSmol prototype)
+## 1. Phân loại tài liệu (ColQwen3.5 prototype)
 
 ### Dữ liệu mẫu
 
@@ -60,6 +60,8 @@ python -m classifyrag.classify_pdf \
 
 - `--max-pages N` — chỉ xử lý N trang đầu.
 - `--w-img` — trọng số nhánh ảnh (còn lại cho text), mặc định 0.7.
+- `--summary PATH` — thêm file CSV chỉ hai cột `page_index`, `predicted_label` (xem nhanh khi chưa có ground truth); `--output` vẫn là bản đầy đủ điểm số / debug.
+- `--mode image` (mặc định) — chỉ MaxSim ảnh. `text` — VLM trích keyword rồi so với prototype **text** (giống `build_index --vlm-keywords`). `fused` — gộp ảnh + text (text lấy từ PDF/OCR + `--vlm-keywords` / `--vlm-always` như pipeline hiện tại). `compare` — một lần chạy, CSV có ba nhãn: VLM-text | image | fused; `--summary` ghi bốn cột (page + ba nhãn).
 - `--ocr`, `--vlm-keywords`, `--characteristic-text` — giống logic lúc build index (nên **khớp** với cách đã build).
 
 ### Đánh giá nhanh trên thư mục mẫu
@@ -94,17 +96,17 @@ python -m classifyrag.eval_blank_pdf \
   --pdf path/to/doc.pdf \
   --index data/index/blank_prototypes.pt \
   --max-pages 50 \
-  --threshold 0.95 \
+  --threshold 0.85 \
   --output out/blank_scores.csv
 ```
 
 Cột chính:
 
-- `cosine01_vs_blank` — điểm trong **[0, 1]** (dùng cho ngưỡng như `0.95`).
-- `raw_maxsim_vs_blank` — điểm **MaxSim** gốc của ColSmol (tổng tương tác muộn, **không** giới hạn [0,1]; chỉ để debug).
+- `cosine01_vs_blank` — điểm trong **[0, 1]** (dùng cho ngưỡng; mặc định CLI `0.85`).
+- `raw_maxsim_vs_blank` — điểm **MaxSim** gốc (tổng tương tác muộn, **không** giới hạn [0,1]; chỉ để debug).
 - `pred_blank` — `cosine01_vs_blank >= threshold`.
 
-**Cách tính `cosine01`:** trung bình pooling vector đa-patch, chuẩn hoá L2, cosine similarity với từng prototype, lấy **max** trên các ảnh tham chiếu, rồi ánh xạ \([-1,1] \rightarrow [0,1]\) bằng \((\cos + 1) / 2\). **Không** dùng ngưỡng 0.95 trực tiếp trên `raw_maxsim` vì thang đo khác nhau.
+**Cách tính `cosine01`:** trung bình pooling vector đa-patch, chuẩn hoá L2, cosine similarity với từng prototype, lấy **max** trên các ảnh tham chiếu, rồi ánh xạ \([-1,1] \rightarrow [0,1]\) bằng \((\cos + 1) / 2\). **Không** dùng cùng một ngưỡng trên `raw_maxsim` như trên `cosine01` vì thang đo khác nhau.
 
 ### Ground truth “có chữ / không chữ” khi đánh giá
 
@@ -121,14 +123,14 @@ model, processor, device = load_model(model_id=idx.model_id)
 cosine01, maxsim = score_blank_for_image(
     page_image, model=model, processor=processor, device=device, blank_index=idx
 )
-is_blank = cosine01 >= 0.95
+is_blank = cosine01 >= 0.85
 ```
 
 Các hàm khác trong `classifyrag/blank_page.py`: `blank_scores`, `is_blank_page`, `build_blank_index_from_dir`.
 
 ### Gợi ý chỉnh ngưỡng
 
-Nếu quá ít/ nhiều trang bị gán “blank”, hãy chỉnh `--threshold` (thường thử **0.90–0.94**) hoặc bổ sung ảnh mẫu trong `data/blank_data` sát với DPI/nền/scan thực tế.
+Nếu quá ít/ nhiều trang bị gán “blank”, hãy chỉnh `--threshold` (thường thử **0.80–0.92**) hoặc bổ sung ảnh mẫu trong `data/blank_data` sát với DPI/nền/scan thực tế.
 
 ---
 
@@ -147,5 +149,7 @@ Nếu quá ít/ nhiều trang bị gán “blank”, hãy chỉnh `--threshold` 
 
 - `data/index/prototypes.pt` — phân loại nhóm tài liệu.
 - `data/index/blank_prototypes.pt` — phát hiện trang trắng.
+
+Mỗi file lưu `model_id` đã dùng lúc embed; `classify_pdf` / `eval_*` load đúng checkpoint đó. **Đổi mô hình embedding** (ví dụ nâng ColQwen3.5) cần **build lại** cả hai index để vector prototype khớp với model mới.
 
 Có thể tái tạo bằng các lệnh `build_*` ở trên sau khi đổi dữ liệu mẫu.

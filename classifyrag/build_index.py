@@ -21,7 +21,7 @@ from classifyrag.pdf_pages import iter_pdf_pages
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Build ColSmol prototype index from labeled sample PDFs.")
+    p = argparse.ArgumentParser(description="Build ColQwen3.5 prototype index from labeled sample PDFs.")
     p.add_argument(
         "--samples-dir",
         type=Path,

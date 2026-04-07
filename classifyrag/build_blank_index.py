@@ -9,7 +9,7 @@ from classifyrag.colsmol_scorer import DEFAULT_MODEL_ID
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Build ColSmol embeddings for blank-page reference images.")
+    p = argparse.ArgumentParser(description="Build ColQwen3.5 embeddings for blank-page reference images.")
     p.add_argument(
         "--samples-dir",
         type=Path,

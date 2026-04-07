@@ -7,18 +7,37 @@ import sys
 from pathlib import Path
 
 from classifyrag.characteristic_text import apply_characteristic_text
-from classifyrag.colsmol_scorer import classify_page, load_index, load_model
+from classifyrag.colsmol_scorer import classify_page, classify_triple, load_index, load_model
 from classifyrag.llm_keywords import DEFAULT_VLM_MODEL, keywords_from_image_vlm
 from classifyrag.pdf_pages import iter_pdf_pages
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Classify each page of a PDF using a ColSmol prototype index.")
+    p = argparse.ArgumentParser(description="Classify each page of a PDF using a ColQwen3.5 prototype index.")
     p.add_argument("--pdf", type=Path, required=True, help="Input PDF path.")
     p.add_argument("--index", type=Path, default=Path("data/index/prototypes.pt"), help="Index from build_index.")
-    p.add_argument("--output", type=Path, required=True, help="Output .csv or .json path.")
+    p.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Detailed output (.csv or .json): scores per label, text metadata, for debugging.",
+    )
+    p.add_argument(
+        "--summary",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional second file: CSV with only page_index and predicted_label for quick review (no ground truth).",
+    )
     p.add_argument("--format", choices=("csv", "json"), default="csv")
     p.add_argument("--w-img", type=float, default=0.7, help="Weight for image branch (text gets 1-w).")
+    p.add_argument(
+        "--mode",
+        choices=("image", "text", "fused", "compare"),
+        default="image",
+        help="image=MaxSim ảnh only; text=VLM keywords → nhánh text vs prototype text; fused=ảnh+text; "
+        "compare=ba cột pred cùng lúc (VLM text | image | fused).",
+    )
     p.add_argument("--dpi", type=float, default=144.0)
     p.add_argument(
         "--max-pages",
@@ -44,7 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--vlm-keywords",
         action="store_true",
-        help="When page has no usable text (typical for scans), run a vision LLM on the page image to produce keywords for ColSmol's text branch (see --vlm-model).",
+        help="When page has no usable text (typical for scans), run a vision LLM on the page image to produce keywords for the retriever text branch (see --vlm-model). "
+        "For --mode fused, use with --vlm-always if index used VLM on every page.",
     )
     p.add_argument("--vlm-model", type=str, default=DEFAULT_VLM_MODEL, help="Hugging Face model id for VLM keywords.")
     p.add_argument("--vlm-device", type=str, default=None, help="Device for VLM (default: same as CUDA if available else cpu).")
@@ -86,49 +106,110 @@ def main(argv: list[str] | None = None) -> int:
         query_text = page.text
         query_text_kind = "page_text" if page.text.strip() else "empty"
         vlm_snippet = ""
+        vlm_raw = ""
 
-        if args.vlm_keywords:
-            need_vlm = args.vlm_always or not page.text.strip()
-            if need_vlm:
-                try:
-                    kw = keywords_from_image_vlm(
-                        page.image,
-                        model_id=args.vlm_model,
-                        device=args.vlm_device,
-                        max_new_tokens=args.vlm_max_tokens,
-                    )
-                except Exception as e:
-                    print(f"VLM keywords failed page {page.page_index}: {e}", file=sys.stderr)
-                    kw = ""
-                if kw.strip():
-                    query_text = kw
-                    query_text_kind = "vlm_keywords"
-                    vlm_snippet = kw[:500]
-                elif not query_text.strip():
-                    query_text_kind = "empty"
+        need_vlm_for_fused = args.vlm_keywords and (args.vlm_always or not page.text.strip())
+        need_vlm_for_compare = args.mode == "compare"
+        need_vlm_for_text_mode = args.mode == "text"
 
-        query_text = apply_characteristic_text(query_text, args.characteristic_text)
-        if args.characteristic_text and query_text.strip():
+        if need_vlm_for_fused or need_vlm_for_compare or need_vlm_for_text_mode:
+            try:
+                kw = keywords_from_image_vlm(
+                    page.image,
+                    model_id=args.vlm_model,
+                    device=args.vlm_device,
+                    max_new_tokens=args.vlm_max_tokens,
+                )
+            except Exception as e:
+                print(f"VLM keywords failed page {page.page_index}: {e}", file=sys.stderr)
+                kw = ""
+            vlm_raw = kw.strip()
+            if need_vlm_for_fused and vlm_raw:
+                query_text = kw
+                query_text_kind = "vlm_keywords"
+                vlm_snippet = kw[:500]
+            elif need_vlm_for_fused and not query_text.strip():
+                query_text_kind = "empty"
+            if need_vlm_for_compare or need_vlm_for_text_mode:
+                vlm_snippet = (kw or "")[:500]
+
+        query_text_fused = apply_characteristic_text(query_text, args.characteristic_text)
+        if args.characteristic_text and query_text_fused.strip():
             if query_text_kind == "page_text":
                 query_text_kind = "characteristic_text"
             elif query_text_kind == "vlm_keywords":
                 query_text_kind = "vlm_keywords_characteristic"
 
-        pred, fused, sim_img, sim_txt = classify_page(
+        query_text_vlm_only = apply_characteristic_text(vlm_raw, args.characteristic_text)
+
+        if args.mode == "compare":
+            triple = classify_triple(
+                processor=processor,
+                device=device,
+                query_image=page.image,
+                query_text_vlm=query_text_vlm_only,
+                query_text_fused=query_text_fused,
+                proto_embs=idx.image_embs,
+                proto_labels=proto_labels,
+                model=model,
+                w_img=args.w_img,
+                batch_size=args.batch_size,
+                proto_text_embs=idx.text_embs,
+            )
+            pred_v = triple["pred_vlm_text"]
+            pred_i = triple["pred_image"]
+            pred_f = triple["pred_fused"]
+            fused = triple["fused_scores"]
+            sim_img = triple["sim_img"]
+            sim_txt_vlm = triple["sim_txt_vlm"]
+            sim_txt_fused = triple["sim_txt_fused"]
+            row = {
+                "page_index": page.page_index,
+                "mode": "compare",
+                "predicted_label": pred_i,
+                "predicted_label_vlm_text": pred_v,
+                "predicted_label_image": pred_i,
+                "predicted_label_fused": pred_f,
+                "text_source": page.text_source,
+                "query_text_kind": query_text_kind,
+                "text_chars": len(page.text),
+                "text_empty": not bool(page.text.strip()),
+                "vlm_keywords_snippet": vlm_snippet,
+            }
+            for k, v in fused.items():
+                row[f"fused_{k}"] = round(v, 6)
+            for k, v in sim_img.items():
+                row[f"img_{k}"] = round(v, 4)
+            for k, v in sim_txt_vlm.items():
+                row[f"txt_vlm_{k}"] = round(v, 4)
+            for k, v in sim_txt_fused.items():
+                row[f"txt_fused_{k}"] = round(v, 4)
+            rows.append(row)
+            continue
+
+        pred_from = "image" if args.mode == "image" else ("text" if args.mode == "text" else "fused")
+        query_for_single = query_text_vlm_only if args.mode == "text" else query_text_fused
+
+        pred, fused, sim_img, sim_txt, pred_img, pred_fused, pred_txt = classify_page(
             processor=processor,
             device=device,
             query_image=page.image,
-            query_text=query_text,
+            query_text=query_for_single,
             proto_embs=idx.image_embs,
             proto_labels=proto_labels,
             model=model,
             w_img=args.w_img,
             batch_size=args.batch_size,
             proto_text_embs=idx.text_embs,
+            pred_from=pred_from,
         )
         row = {
             "page_index": page.page_index,
+            "mode": args.mode,
             "predicted_label": pred,
+            "predicted_label_image": pred_img,
+            "predicted_label_fused": pred_fused,
+            "predicted_label_text": pred_txt,
             "text_source": page.text_source,
             "query_text_kind": query_text_kind,
             "text_chars": len(page.text),
@@ -156,7 +237,27 @@ def main(argv: list[str] | None = None) -> int:
                 w.writeheader()
                 w.writerows(rows)
 
+    summary_fields: tuple[str, ...] = ("page_index", "predicted_label")
+    if args.summary is not None:
+        args.summary.parent.mkdir(parents=True, exist_ok=True)
+        if args.mode == "compare":
+            summary_fields = (
+                "page_index",
+                "predicted_label_vlm_text",
+                "predicted_label_image",
+                "predicted_label_fused",
+            )
+        else:
+            summary_fields = ("page_index", "predicted_label")
+        with args.summary.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=summary_fields)
+            w.writeheader()
+            for r in rows:
+                w.writerow({k: r[k] for k in summary_fields})
+
     print(f"Wrote {len(rows)} rows to {args.output}")
+    if args.summary is not None:
+        print(f"Wrote summary {summary_fields} to {args.summary}")
     return 0
 
 

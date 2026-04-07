@@ -19,5 +19,5 @@ torchvision>=0.17.0
 # Hugging Face (generic AutoModel fallback)
 transformers>=5.3.0,<6.0.0
 
-# ColSmol / ColIdefics3 (vidore/colSmol-256M) — installs colpali_engine
+# ColQwen3.5 (e.g. athrael-soju/colqwen3.5-4.5B-v3) — installs colpali_engine
 git+https://github.com/illuin-tech/colpali.git
