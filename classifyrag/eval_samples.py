@@ -32,6 +32,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Match classify_pdf / index: use titles and field labels only for the text branch.",
     )
+    p.add_argument(
+        "--score-style",
+        choices=("colpali", "intrinsic"),
+        default="colpali",
+        help="Match classify_pdf scoring (see classify_pdf --score-style).",
+    )
     args = p.parse_args(argv)
 
     pdfs = sorted(args.samples_dir.glob("*.pdf"))
@@ -63,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                 w_img=args.w_img,
                 proto_text_embs=idx.text_embs,
                 pred_from=args.mode,
+                score_style=args.score_style,
             )
             total_pages += 1
             if pred == exp:

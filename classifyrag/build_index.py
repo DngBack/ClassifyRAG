@@ -56,6 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--vlm-device", type=str, default=None, help="Device for VLM (default: CUDA if available else cpu).")
     p.add_argument("--vlm-max-tokens", type=int, default=256, help="Max new tokens for VLM generation.")
     p.add_argument(
+        "--vlm-keyword-count",
+        type=int,
+        default=5,
+        help="Max distinctive keywords from VLM (comma-separated, de-duped). Use 0 for legacy long list (10-25).",
+    )
+    p.add_argument(
         "--vlm-always",
         action="store_true",
         help="Always replace page text with VLM keywords when --vlm-keywords is set (slow).",
@@ -100,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                             model_id=args.vlm_model,
                             device=args.vlm_device,
                             max_new_tokens=args.vlm_max_tokens,
+                            max_keywords=args.vlm_keyword_count if args.vlm_keyword_count > 0 else None,
                         )
                     except Exception as e:
                         print(f"VLM keywords failed {pdf_path.name} page {page.page_index}: {e}", file=sys.stderr)

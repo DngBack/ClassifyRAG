@@ -19,15 +19,55 @@ logger = logging.getLogger(__name__)
 # ~4B, image+text; requires recent transformers (Qwen3VLForConditionalGeneration).
 DEFAULT_VLM_MODEL = "Qwen/Qwen3-VL-4B-Instruct"
 
-KEYWORD_PROMPT_VI = (
-    "Đây là một trang giấy tờ tiếng Việt (giấy ngân hàng, thẻ, tờ trình, giấy cư trú, v.v.). "
-    "Chỉ liệt kê các manh mối cố định theo LOẠI tài liệu: tên/loại giấy hoặc tiêu đề in sẵn, "
-    "tên các ô/trường trên biểu mẫu (ví dụ: số tiền gửi, loại tiền, định kỳ trả lãi, ngày mở, ghi nợ), "
-    "và thuật ngữ đặc trưng của loại giấy đó. "
-    "TUYỆT ĐỐI KHÔNG ghi: họ tên người, số tiền hoặc số cụ thể, số tài khoản, mã seri, ngày tháng năm, "
-    "địa chỉ, CMND/CCCD, số điện thoại. "
-    "Từ 10 đến 25 cụm ngắn, cách nhau bởi dấu phẩy. Chỉ in danh sách, không giải thích."
+KEYWORD_PROMPT_VI_LEGACY = (
+    "Trang giấy tờ tiếng Việt (ngân hàng, thẻ, tờ trình, chứng minh cư trú…). "
+    "Chỉ trích TỪ KHÓA ĐẶC TRƯNG để nhận diện LOẠI tài liệu: tên/loại giấy, dòng tiêu đề chính in trên form, "
+    "và tối đa vài cụm thuật ngữ/ô gắn với loại đó — đủ để phân biệt với loại giấy khác. "
+    "KHÔNG liệt kê dài toàn bộ nhãn ô (STT, ngày, chữ ký, User, giao dịch thông thường…); không “đọc hết” biểu mẫu. "
+    "TUYỆT ĐỐI không: họ tên, giá trị số (tiền, mã, TK), ngày tháng cụ thể, địa chỉ, CMND/CCCD, SĐT. "
+    "In 8–15 cụm ngắn (mỗi cụm 1–4 từ), cách nhau dấu phẩy; không giải thích, không đánh số."
 )
+
+# Alias for callers that still import KEYWORD_PROMPT_VI
+KEYWORD_PROMPT_VI = KEYWORD_PROMPT_VI_LEGACY
+
+
+def keyword_prompt_vi_capped(max_keywords: int) -> str:
+    """Prompt for a short, document-type keyword list (retriever text branch)."""
+    n = max(1, min(int(max_keywords), 12))
+    return (
+        "Trang giấy tờ tiếng Việt (ngân hàng, form, tờ trình, chứng minh cư trú…). "
+        f"Chỉ in tối đa {n} TỪ KHÓA ĐẶC TRƯNG (mỗi cụm 1–4 từ) để phân biệt LOẠI giấy: "
+        "tên/loại giấy hoặc tiêu đề chính; thêm vài cụm chỉ đúng loại đó nếu cần. "
+        "KHÔNG dump nhãn ô chung, không liệt kê cột giao dịch dài. "
+        "TUYỆT ĐỐI không: họ tên, số/mã/giá trị, ngày cụ thể, địa chỉ, CMND/CCCD, SĐT. "
+        "Nối bằng dấu phẩy; không giải thích, không đánh số."
+    )
+
+
+def normalize_keyword_string(raw: str, max_keywords: int | None) -> str:
+    """
+    Split comma/semicolon-separated keywords, de-duplicate in order, cap count.
+    If max_keywords is None or <= 0, return stripped raw only.
+    """
+    if not raw or not raw.strip():
+        return ""
+    s = raw.strip()
+    if max_keywords is None or max_keywords <= 0:
+        return s
+    cap = int(max_keywords)
+    out: list[str] = []
+    for chunk in s.replace(";", ",").replace("\n", ",").split(","):
+        part = chunk.strip().strip(".")
+        if not part:
+            continue
+        key = part.casefold()
+        if any(o.casefold() == key for o in out):
+            continue
+        out.append(part)
+        if len(out) >= cap:
+            break
+    return ", ".join(out)
 
 _vlm_cache: Optional[tuple[str, Any, Any, str]] = None
 
@@ -89,14 +129,21 @@ def keywords_from_image_vlm(
     model_id: str = DEFAULT_VLM_MODEL,
     device: Optional[str] = None,
     max_new_tokens: int = 256,
-    prompt: str = KEYWORD_PROMPT_VI,
+    prompt: Optional[str] = None,
+    max_keywords: Optional[int] = 5,
 ) -> str:
     """
-    Generate a keyword string from a page image using Qwen2-VL or Qwen3-VL Instruct.
+    Generate a keyword string from a page image using Qwen2/3-VL Instruct.
+    ``max_keywords``: cap and light de-duplication; use ``None`` or ``0`` for legacy long lists.
     Returns empty string on failure.
     """
     image = image.convert("RGB")
     model, processor, dev = load_vlm(model_id, device=device)
+    if prompt is None:
+        if max_keywords is not None and max_keywords > 0:
+            prompt = keyword_prompt_vi_capped(max_keywords)
+        else:
+            prompt = KEYWORD_PROMPT_VI_LEGACY
 
     messages = [
         {
@@ -119,7 +166,7 @@ def keywords_from_image_vlm(
     out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     in_len = inputs["input_ids"].shape[1]
     gen = processor.batch_decode(out[:, in_len:], skip_special_tokens=True)[0]
-    return gen.strip()
+    return normalize_keyword_string(gen, max_keywords)
 
 
 def clear_vlm_cache() -> None:

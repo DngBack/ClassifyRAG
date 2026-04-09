@@ -21,3 +21,6 @@ transformers>=5.3.0,<6.0.0
 
 # ColQwen3.5 (e.g. athrael-soju/colqwen3.5-4.5B-v3) — installs colpali_engine
 git+https://github.com/illuin-tech/colpali.git
+
+# Web UI (optional): streamlit run streamlit_app.py
+streamlit>=1.33.0

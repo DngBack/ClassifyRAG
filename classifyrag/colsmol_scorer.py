@@ -4,7 +4,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal, Optional
+from typing import Any, Iterable, Literal, Optional, Sequence
 
 import torch
 from colpali_engine.models import ColQwen3_5, ColQwen3_5Processor
@@ -15,6 +15,11 @@ from classifyrag.labels import ORDERED_LABELS
 
 DEFAULT_MODEL_ID = "athrael-soju/colqwen3.5-4.5B-v3"
 DEFAULT_TEXT_CHARS = 1024
+
+# colpali = late-interaction MaxSim + branch min–max fusion (legacy).
+# intrinsic = image: top-k prototype MaxSim mean / num_query_tokens → [0,1];
+#            text: mean-pool multivector → unit vector, cosine → (cos+1)/2, top-k mean; fuse without branch min–max.
+ScoreStyle = Literal["colpali", "intrinsic"]
 
 
 @dataclass
@@ -149,6 +154,31 @@ def maxsim_vs_prototypes(
     return float(scores[0].max().item())
 
 
+def aggregate_label_score(
+    processor: ColQwen3_5Processor,
+    query_emb: torch.Tensor,
+    proto_embs: list[torch.Tensor],
+    device: str,
+    agg: Literal["max", "topk_mean"] = "topk_mean",
+    topk: int = 3,
+) -> float:
+    """
+    Aggregate query-vs-prototypes score for one label.
+    - max: classic MaxSim over prototypes (can favor labels with many prototypes)
+    - topk_mean: mean of top-k prototype scores (more robust to label-size imbalance)
+    """
+    if not proto_embs:
+        return float("-inf")
+    scores = processor.score([query_emb], proto_embs, device=device)[0].float().cpu()
+    if scores.numel() == 0:
+        return float("-inf")
+    if agg == "max":
+        return float(scores.max().item())
+    k = max(1, min(int(topk), int(scores.numel())))
+    top_vals = torch.topk(scores, k=k).values
+    return float(top_vals.mean().item())
+
+
 def scores_per_label(
     processor: ColQwen3_5Processor,
     query_emb: torch.Tensor,
@@ -156,11 +186,129 @@ def scores_per_label(
     proto_labels: list[str],
     labels: Iterable[str],
     device: str,
+    label_score_agg: Literal["max", "topk_mean"] = "topk_mean",
+    label_score_topk: int = 3,
 ) -> dict[str, float]:
     out: dict[str, float] = {}
     for lab in labels:
         ps = [e for e, lb in zip(proto_embs, proto_labels, strict=True) if lb == lab and e is not None]
-        out[lab] = maxsim_vs_prototypes(processor, query_emb, ps, device=device)
+        out[lab] = aggregate_label_score(
+            processor,
+            query_emb,
+            ps,
+            device=device,
+            agg=label_score_agg,
+            topk=label_score_topk,
+        )
+    return out
+
+
+def _num_query_tokens(emb: torch.Tensor) -> int:
+    if emb.dim() == 2:
+        return int(emb.shape[0])
+    return 1
+
+
+def _pool_unit_vector(emb: torch.Tensor) -> torch.Tensor:
+    """Mean-pool token/patch rows then L2-normalize to unit vector."""
+    x = emb.float()
+    if x.dim() == 2:
+        v = x.mean(dim=0)
+    else:
+        v = x.flatten()
+    n = float(v.norm(p=2).item())
+    if n < 1e-8:
+        return torch.zeros_like(v)
+    return v / n
+
+
+def _cosine_01_pooled(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Cosine similarity of pooled unit vectors, mapped to [0, 1]."""
+    cos = float(torch.dot(a.flatten(), b.flatten()).clamp(-1.0, 1.0).item())
+    return max(0.0, min(1.0, (cos + 1.0) * 0.5))
+
+
+def scores_per_label_image_intrinsic(
+    processor: ColQwen3_5Processor,
+    query_emb: torch.Tensor,
+    proto_embs: list[Optional[torch.Tensor]],
+    proto_labels: list[str],
+    labels: Iterable[str],
+    device: str,
+    topk: int = 3,
+) -> dict[str, float]:
+    """
+    Per label: mean of top-``topk`` **page-level** MaxSim scores (colpali ``processor.score``),
+    divided by number of query image tokens, clamped to [0, 1].
+    """
+    nq = max(_num_query_tokens(query_emb), 1)
+    out: dict[str, float] = {}
+    tk = max(1, int(topk))
+    for lab in labels:
+        ps = [e for e, lb in zip(proto_embs, proto_labels, strict=True) if lb == lab and e is not None]
+        if not ps:
+            out[lab] = 0.0
+            continue
+        scores = processor.score([query_emb], ps, device=device)[0].float().cpu()
+        if scores.numel() == 0:
+            out[lab] = 0.0
+            continue
+        k = min(tk, int(scores.numel()))
+        top_mean = float(torch.topk(scores, k=k).values.mean().item())
+        raw = top_mean / float(nq)
+        out[lab] = max(0.0, min(1.0, raw))
+    return out
+
+
+def scores_per_label_text_pooled_cosine(
+    query_emb: Optional[torch.Tensor],
+    proto_embs: Sequence[Optional[torch.Tensor]],
+    proto_labels: list[str],
+    labels: Iterable[str],
+    topk: int = 3,
+) -> dict[str, float]:
+    """
+    Mean-pool query + prototype text multivectors → unit vectors; cosine → [0,1]; per label: top-k mean over prototypes.
+    """
+    out: dict[str, float] = {}
+    if query_emb is None:
+        return {lab: 0.0 for lab in labels}
+    tk = max(1, int(topk))
+    qv = _pool_unit_vector(query_emb)
+    for lab in labels:
+        cos_vals: list[float] = []
+        for e, lb in zip(proto_embs, proto_labels, strict=True):
+            if lb != lab or e is None:
+                continue
+            cos_vals.append(_cosine_01_pooled(qv, _pool_unit_vector(e)))
+        if not cos_vals:
+            out[lab] = 0.0
+        else:
+            t = torch.tensor(cos_vals, dtype=torch.float32)
+            k = min(tk, int(t.numel()))
+            out[lab] = float(torch.topk(t, k=k).values.mean().item())
+    return out
+
+
+def fuse_image_text_intrinsic(
+    scores_img: dict[str, float],
+    scores_txt: Optional[dict[str, float]],
+    w_img: float,
+) -> dict[str, float]:
+    """Fuse branch scores in ~[0,1] without per-branch min–max."""
+    w_img = max(0.0, min(1.0, w_img))
+    keys = list(scores_img.keys())
+    if not _text_scores_usable(scores_txt):
+        return {k: max(0.0, min(1.0, float(scores_img[k]))) for k in keys}
+    assert scores_txt is not None
+    out: dict[str, float] = {}
+    for k in keys:
+        vi = float(scores_img[k])
+        vi = max(0.0, min(1.0, vi)) if math.isfinite(vi) else 0.0
+        vt_raw = scores_txt.get(k, 0.0)
+        vt = float(vt_raw)
+        vt = max(0.0, min(1.0, vt)) if math.isfinite(vt) else 0.0
+        out[k] = max(0.0, min(1.0, w_img * vi + (1.0 - w_img) * vt))
     return out
 
 
@@ -184,6 +332,85 @@ def _pred_from_txt(sim_txt: dict[str, float], fallback: str) -> str:
     return fallback
 
 
+def softmax_scores(scores: dict[str, float]) -> dict[str, float]:
+    """Numerically stable softmax over finite scores; non-finite values get 0.0 probability."""
+    if not scores:
+        return {}
+    finite = {k: v for k, v in scores.items() if math.isfinite(v)}
+    if not finite:
+        n = len(scores)
+        return {k: 1.0 / n for k in scores}
+    m = max(finite.values())
+    exps = {k: math.exp(v - m) for k, v in finite.items()}
+    z = sum(exps.values())
+    out: dict[str, float] = {}
+    for k in scores:
+        if k in exps and z > 0:
+            out[k] = exps[k] / z
+        else:
+            out[k] = 0.0
+    return out
+
+
+def predict_with_other(
+    scores: dict[str, float],
+    *,
+    other_threshold: Optional[float] = None,
+    other_label: str = "other",
+) -> tuple[str, dict[str, float], float]:
+    """
+    Predict from scores using raw top-1 score threshold.
+    If ``other_threshold`` is set and top-1 score is below it, return ``other_label``.
+    Softmax probabilities are returned for logging/debug only.
+    """
+    if not scores:
+        return other_label, {}, 0.0
+
+    finite_scores = {k: v for k, v in scores.items() if math.isfinite(v)}
+    if not finite_scores:
+        probs = softmax_scores(scores)
+        return other_label, probs, 0.0
+
+    best_label = max(finite_scores, key=finite_scores.get)
+    best_score = finite_scores[best_label]
+    probs = softmax_scores(scores)
+    if other_threshold is not None and best_score < other_threshold:
+        return other_label, probs, best_score
+    return best_label, probs, best_score
+
+
+def score_diagnostics(scores: dict[str, float]) -> dict[str, float | str]:
+    """Per-page diagnostics to make thresholding comparable across score scales."""
+    finite = [(k, v) for k, v in scores.items() if math.isfinite(v)]
+    if not finite:
+        return {
+            "top1_label": "",
+            "top1_score": 0.0,
+            "top2_score": 0.0,
+            "margin_top1_top2": 0.0,
+            "margin_norm": 0.0,
+            "z_gap_top1_top2": 0.0,
+        }
+    finite.sort(key=lambda x: x[1], reverse=True)
+    top1_label, top1 = finite[0]
+    top2 = finite[1][1] if len(finite) > 1 else top1
+    vals = [v for _, v in finite]
+    lo, hi = min(vals), max(vals)
+    rng = max(1e-8, hi - lo)
+    mean = sum(vals) / len(vals)
+    var = sum((v - mean) ** 2 for v in vals) / len(vals)
+    std = max(1e-8, math.sqrt(var))
+    margin = top1 - top2
+    return {
+        "top1_label": top1_label,
+        "top1_score": top1,
+        "top2_score": top2,
+        "margin_top1_top2": margin,
+        "margin_norm": margin / rng,
+        "z_gap_top1_top2": margin / std,
+    }
+
+
 @torch.inference_mode()
 def classify_triple(
     processor: ColQwen3_5Processor,
@@ -198,6 +425,9 @@ def classify_triple(
     text_max_chars: int = DEFAULT_TEXT_CHARS,
     batch_size: int = 4,
     proto_text_embs: Optional[list[Optional[torch.Tensor]]] = None,
+    label_score_agg: Literal["max", "topk_mean"] = "topk_mean",
+    label_score_topk: int = 3,
+    score_style: ScoreStyle = "colpali",
 ) -> dict[str, Any]:
     """
     One image forward + two text forwards: VLM-only query vs prototype text (``sim_txt_vlm``),
@@ -206,29 +436,98 @@ def classify_triple(
     Use this for side-by-side **vlm_text | image | fused** comparison on the same page.
     """
     q_img = embed_images(model, processor, [query_image], device=device, batch_size=batch_size)[0]
+    proto_for_txt = proto_text_embs if proto_text_embs is not None else proto_embs
+
+    if score_style == "intrinsic":
+        sim_img = scores_per_label_image_intrinsic(
+            processor,
+            q_img,
+            proto_embs,
+            proto_labels,
+            ORDERED_LABELS,
+            device=device,
+            topk=label_score_topk,
+        )
+        pred_img = max(sim_img, key=sim_img.get)
+
+        tv = truncate_text(query_text_vlm, text_max_chars)
+        qv_list = embed_query_texts(model, processor, [tv], device=device, batch_size=1)
+        qv = qv_list[0]
+        sim_txt_vlm: dict[str, float] = {}
+        if qv is not None:
+            sim_txt_vlm = scores_per_label_text_pooled_cosine(
+                qv, proto_for_txt, proto_labels, ORDERED_LABELS, topk=label_score_topk
+            )
+
+        tf = truncate_text(query_text_fused, text_max_chars)
+        qf_list = embed_query_texts(model, processor, [tf], device=device, batch_size=1)
+        qf = qf_list[0]
+        sim_txt_fused: dict[str, float] = {}
+        if qf is not None:
+            sim_txt_fused = scores_per_label_text_pooled_cosine(
+                qf, proto_for_txt, proto_labels, ORDERED_LABELS, topk=label_score_topk
+            )
+
+        pred_vlm_text = _pred_from_txt(sim_txt_vlm, pred_img)
+        txt_for_fuse = (
+            sim_txt_fused if (qf is not None and _text_scores_usable(sim_txt_fused)) else None
+        )
+        fused = fuse_image_text_intrinsic(
+            sim_img, txt_for_fuse, w_img=w_img if txt_for_fuse is not None else 1.0
+        )
+        pred_fused = max(fused, key=fused.get)
+        return {
+            "pred_vlm_text": pred_vlm_text,
+            "pred_image": pred_img,
+            "pred_fused": pred_fused,
+            "sim_img": sim_img,
+            "sim_txt_vlm": sim_txt_vlm,
+            "sim_txt_fused": sim_txt_fused,
+            "fused_scores": fused,
+        }
+
     sim_img = scores_per_label(
-        processor, q_img, proto_embs, proto_labels, ORDERED_LABELS, device=device
+        processor,
+        q_img,
+        proto_embs,
+        proto_labels,
+        ORDERED_LABELS,
+        device=device,
+        label_score_agg=label_score_agg,
+        label_score_topk=label_score_topk,
     )
     pred_img = max(sim_img, key=sim_img.get)
-
-    proto_for_txt = proto_text_embs if proto_text_embs is not None else proto_embs
 
     tv = truncate_text(query_text_vlm, text_max_chars)
     qv_list = embed_query_texts(model, processor, [tv], device=device, batch_size=1)
     qv = qv_list[0]
-    sim_txt_vlm: dict[str, float] = {}
+    sim_txt_vlm = {}
     if qv is not None:
         sim_txt_vlm = scores_per_label(
-            processor, qv, proto_for_txt, proto_labels, ORDERED_LABELS, device=device
+            processor,
+            qv,
+            proto_for_txt,
+            proto_labels,
+            ORDERED_LABELS,
+            device=device,
+            label_score_agg=label_score_agg,
+            label_score_topk=label_score_topk,
         )
 
     tf = truncate_text(query_text_fused, text_max_chars)
     qf_list = embed_query_texts(model, processor, [tf], device=device, batch_size=1)
     qf = qf_list[0]
-    sim_txt_fused: dict[str, float] = {}
+    sim_txt_fused = {}
     if qf is not None:
         sim_txt_fused = scores_per_label(
-            processor, qf, proto_for_txt, proto_labels, ORDERED_LABELS, device=device
+            processor,
+            qf,
+            proto_for_txt,
+            proto_labels,
+            ORDERED_LABELS,
+            device=device,
+            label_score_agg=label_score_agg,
+            label_score_topk=label_score_topk,
         )
 
     pred_vlm_text = _pred_from_txt(sim_txt_vlm, pred_img)
@@ -263,6 +562,9 @@ def classify_page(
     batch_size: int = 4,
     proto_text_embs: Optional[list[Optional[torch.Tensor]]] = None,
     pred_from: Literal["image", "text", "fused"] = "image",
+    label_score_agg: Literal["max", "topk_mean"] = "topk_mean",
+    label_score_topk: int = 3,
+    score_style: ScoreStyle = "colpali",
 ) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], str, str, str]:
     """
     Returns predicted label, fused scores, raw image scores, raw text scores (or empty),
@@ -272,8 +574,55 @@ def classify_page(
     ``fused`` = sau khi gộp ảnh+text. Chế độ ``image`` không embed query text (nhanh hơn).
     """
     q_img = embed_images(model, processor, [query_image], device=device, batch_size=batch_size)[0]
+
+    if score_style == "intrinsic":
+        sim_img = scores_per_label_image_intrinsic(
+            processor,
+            q_img,
+            proto_embs,
+            proto_labels,
+            ORDERED_LABELS,
+            device=device,
+            topk=label_score_topk,
+        )
+        pred_img = max(sim_img, key=sim_img.get)
+        if pred_from == "image":
+            fused = dict(sim_img)
+            pred_fused = max(fused, key=fused.get)
+            return pred_img, fused, sim_img, {}, pred_img, pred_fused, pred_img
+
+        t = truncate_text(query_text, text_max_chars)
+        q_txt_list = embed_query_texts(model, processor, [t], device=device, batch_size=1)
+        q_txt = q_txt_list[0]
+
+        sim_txt: dict[str, float] = {}
+        if q_txt is not None:
+            proto_for_txt = proto_text_embs if proto_text_embs is not None else proto_embs
+            sim_txt = scores_per_label_text_pooled_cosine(
+                q_txt, proto_for_txt, proto_labels, ORDERED_LABELS, topk=label_score_topk
+            )
+
+        txt_for_fuse = sim_txt if (q_txt is not None and _text_scores_usable(sim_txt)) else None
+        fused = fuse_image_text_intrinsic(
+            sim_img, txt_for_fuse, w_img=w_img if txt_for_fuse is not None else 1.0
+        )
+        pred_fused = max(fused, key=fused.get)
+        pred_txt = _pred_from_txt(sim_txt, pred_img)
+        if pred_from == "text":
+            pred = pred_txt
+        else:
+            pred = pred_fused
+        return pred, fused, sim_img, sim_txt, pred_img, pred_fused, pred_txt
+
     sim_img = scores_per_label(
-        processor, q_img, proto_embs, proto_labels, ORDERED_LABELS, device=device
+        processor,
+        q_img,
+        proto_embs,
+        proto_labels,
+        ORDERED_LABELS,
+        device=device,
+        label_score_agg=label_score_agg,
+        label_score_topk=label_score_topk,
     )
     pred_img = max(sim_img, key=sim_img.get)
 
@@ -286,11 +635,18 @@ def classify_page(
     q_txt_list = embed_query_texts(model, processor, [t], device=device, batch_size=1)
     q_txt = q_txt_list[0]
 
-    sim_txt: dict[str, float] = {}
+    sim_txt = {}
     if q_txt is not None:
         proto_for_txt = proto_text_embs if proto_text_embs is not None else proto_embs
         sim_txt = scores_per_label(
-            processor, q_txt, proto_for_txt, proto_labels, ORDERED_LABELS, device=device
+            processor,
+            q_txt,
+            proto_for_txt,
+            proto_labels,
+            ORDERED_LABELS,
+            device=device,
+            label_score_agg=label_score_agg,
+            label_score_topk=label_score_topk,
         )
 
     txt_for_fuse = sim_txt if (q_txt is not None and _text_scores_usable(sim_txt)) else None
