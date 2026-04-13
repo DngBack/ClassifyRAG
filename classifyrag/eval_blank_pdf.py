@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-pages", type=int, default=50, help="Only first N pages (default 50).")
     p.add_argument("--threshold", type=float, default=0.85, help="Blank if cosine01 >= this (default 0.85).")
     p.add_argument("--dpi", type=float, default=144.0)
-    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=5)
     p.add_argument("--device", type=str, default=None)
     p.add_argument(
         "--gt-ocr",

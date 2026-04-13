@@ -1,0 +1,330 @@
+[
+  {
+    "doc_id": 1,
+    "label": "liet_ke_giao_dich",
+    "start_page": 1,
+    "end_page": 2,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 2,
+    "label": "so_quy",
+    "start_page": 3,
+    "end_page": 3,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 3,
+    "label": "blank",
+    "start_page": 4,
+    "end_page": 4,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 4,
+    "label": "giay_de_nghi_tiep_quy",
+    "start_page": 5,
+    "end_page": 6,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 5,
+    "label": "giay_rut_tien",
+    "start_page": 7,
+    "end_page": 7,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 6,
+    "label": "blank",
+    "start_page": 8,
+    "end_page": 8,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 7,
+    "label": "giay_de_nghi_tiep_quy",
+    "start_page": 9,
+    "end_page": 10,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 8,
+    "label": "giay_de_nghi_tiep_quy",
+    "start_page": 11,
+    "end_page": 12,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 9,
+    "label": "giay_rut_tien",
+    "start_page": 13,
+    "end_page": 13,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 10,
+    "label": "blank",
+    "start_page": 14,
+    "end_page": 14,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 11,
+    "label": "giay_de_nghi_tiep_quy",
+    "start_page": 15,
+    "end_page": 16,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 12,
+    "label": "giay_rut_tien",
+    "start_page": 17,
+    "end_page": 17,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 13,
+    "label": "blank",
+    "start_page": 18,
+    "end_page": 18,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 14,
+    "label": "giay_nop_chuyen_tien",
+    "start_page": 19,
+    "end_page": 19,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 15,
+    "label": "blank",
+    "start_page": 20,
+    "end_page": 20,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 16,
+    "label": "giay_rut_tien",
+    "start_page": 21,
+    "end_page": 21,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 17,
+    "label": "blank",
+    "start_page": 22,
+    "end_page": 22,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 18,
+    "label": "giay_rut_tien",
+    "start_page": 23,
+    "end_page": 23,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 19,
+    "label": "blank",
+    "start_page": 24,
+    "end_page": 24,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 20,
+    "label": "giay_de_nghi_hoan_quy",
+    "start_page": 25,
+    "end_page": 26,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 21,
+    "label": "giay_de_nghi_hoan_quy",
+    "start_page": 27,
+    "end_page": 28,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 22,
+    "label": "the_tiet_kiem_ban_sao",
+    "start_page": 29,
+    "end_page": 30,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 23,
+    "label": "giay_gui_tien_tiet_kiem",
+    "start_page": 31,
+    "end_page": 31,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 24,
+    "label": "blank",
+    "start_page": 32,
+    "end_page": 32,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 25,
+    "label": "giay_gui_tien_tiet_kiem",
+    "start_page": 33,
+    "end_page": 33,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 26,
+    "label": "blank",
+    "start_page": 34,
+    "end_page": 34,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 27,
+    "label": "to_trinh_uu_dai_lai_suat",
+    "start_page": 35,
+    "end_page": 35,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 28,
+    "label": "blank",
+    "start_page": 36,
+    "end_page": 36,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 29,
+    "label": "the_tiet_kiem_ban_sao",
+    "start_page": 37,
+    "end_page": 37,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 30,
+    "label": "giay_nop_chuyen_tien",
+    "start_page": 38,
+    "end_page": 38,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 31,
+    "label": "giay_gui_tien_tiet_kiem",
+    "start_page": 39,
+    "end_page": 39,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 32,
+    "label": "blank",
+    "start_page": 40,
+    "end_page": 40,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 33,
+    "label": "giay_gui_tien_tiet_kiem",
+    "start_page": 41,
+    "end_page": 41,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 34,
+    "label": "giay_nop_chuyen_tien",
+    "start_page": 42,
+    "end_page": 42,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 35,
+    "label": "giay_gui_tien_tiet_kiem",
+    "start_page": 43,
+    "end_page": 43,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 36,
+    "label": "blank",
+    "start_page": 44,
+    "end_page": 44,
+    "page_count": 1,
+    "split_reason": "position_none"
+  },
+  {
+    "doc_id": 37,
+    "label": "giay_gui_tien_tiet_kiem",
+    "start_page": 45,
+    "end_page": 45,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 38,
+    "label": "giay_nop_chuyen_tien",
+    "start_page": 46,
+    "end_page": 46,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 39,
+    "label": "the_tiet_kiem_ban_sao",
+    "start_page": 47,
+    "end_page": 48,
+    "page_count": 2,
+    "split_reason": "position_end"
+  },
+  {
+    "doc_id": 40,
+    "label": "giay_gui_tien_tiet_kiem",
+    "start_page": 49,
+    "end_page": 49,
+    "page_count": 1,
+    "split_reason": "position_start"
+  },
+  {
+    "doc_id": 41,
+    "label": "blank",
+    "start_page": 50,
+    "end_page": 50,
+    "page_count": 1,
+    "split_reason": "position_none"
+  }
+]

@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             ocr_language=args.ocr_lang,
         ):
             qtext = apply_characteristic_text(page.text, args.characteristic_text)
-            pred, _, _, _, _, _, _ = classify_page(
+            pred, _, _, _, _, _, _, _, _ = classify_page(
                 processor=processor,
                 device=device,
                 query_image=page.image,

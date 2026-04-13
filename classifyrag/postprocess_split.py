@@ -120,6 +120,95 @@ def split_page_preds(
     return docs
 
 
+def group_by_position(
+    rows: list[dict[str, Any]],
+    *,
+    label_field: str = "predicted_label",
+    position_field: str = "predicted_label_2",
+) -> list[dict[str, Any]]:
+    """Group pages into document instances based on position labels (start/mid/end).
+
+    Rules:
+    - ``start`` opens a new document (label taken from this page).
+    - ``mid`` / ``end`` are merged into the current open document.
+    - ``end`` also closes the current document.
+    - If ``mid`` / ``end`` appears without a preceding ``start``, it starts its own document.
+    """
+    if not rows:
+        return []
+    sorted_rows = sorted(rows, key=lambda r: int(r["page_index"]))
+    docs: list[dict[str, Any]] = []
+    current_doc: dict[str, Any] | None = None
+    doc_id = 1
+
+    def _close_current() -> None:
+        nonlocal current_doc, doc_id
+        if current_doc is not None:
+            docs.append(current_doc)
+            doc_id += 1
+            current_doc = None
+
+    for r in sorted_rows:
+        pos = str(r.get(position_field, "start"))
+        label = str(r[label_field])
+        page_idx = int(r["page_index"])
+
+        if pos == "start":
+            _close_current()
+            current_doc = {
+                "doc_id": doc_id,
+                "label": label,
+                "start_page": page_idx + 1,
+                "end_page": page_idx + 1,
+                "page_count": 1,
+                "split_reason": "position_start",
+            }
+        elif pos in ("mid", "end"):
+            if current_doc is not None:
+                current_doc["end_page"] = page_idx + 1
+                current_doc["page_count"] += 1
+                if pos == "end":
+                    current_doc["split_reason"] = "position_end"
+                    _close_current()
+            else:
+                current_doc = {
+                    "doc_id": doc_id,
+                    "label": label,
+                    "start_page": page_idx + 1,
+                    "end_page": page_idx + 1,
+                    "page_count": 1,
+                    "split_reason": f"position_{pos}_no_start",
+                }
+                if pos == "end":
+                    _close_current()
+        elif pos in ("none", "None"):
+            _close_current()
+            docs.append(
+                {
+                    "doc_id": doc_id,
+                    "label": label,
+                    "start_page": page_idx + 1,
+                    "end_page": page_idx + 1,
+                    "page_count": 1,
+                    "split_reason": "position_none",
+                }
+            )
+            doc_id += 1
+        else:
+            _close_current()
+            current_doc = {
+                "doc_id": doc_id,
+                "label": label,
+                "start_page": page_idx + 1,
+                "end_page": page_idx + 1,
+                "page_count": 1,
+                "split_reason": "position_unknown",
+            }
+
+    _close_current()
+    return docs
+
+
 def _pick_feature_columns(rows: list[dict[str, Any]], preferred_prefix: str = "fused_") -> list[str]:
     if not rows:
         return []

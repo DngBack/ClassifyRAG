@@ -11,7 +11,7 @@ from colpali_engine.models import ColQwen3_5, ColQwen3_5Processor
 from colpali_engine.utils.torch_utils import get_torch_device, unbind_padded_multivector_embeddings
 from PIL import Image
 
-from classifyrag.labels import ORDERED_LABELS
+from classifyrag.labels import ORDERED_LABELS, POSITION_LABELS
 
 DEFAULT_MODEL_ID = "athrael-soju/colqwen3.5-4.5B-v3"
 DEFAULT_TEXT_CHARS = 1024
@@ -78,7 +78,7 @@ def embed_images(
     processor: ColQwen3_5Processor,
     images: list[Image.Image],
     device: str,
-    batch_size: int = 4,
+    batch_size: int = 5,
 ) -> list[torch.Tensor]:
     out: list[torch.Tensor] = []
     for i in range(0, len(images), batch_size):
@@ -290,6 +290,48 @@ def scores_per_label_text_pooled_cosine(
     return out
 
 
+@torch.inference_mode()
+def _maxsim_top_k_query_tokens(
+    query_emb: torch.Tensor,
+    proto_emb: torch.Tensor,
+    k: int = 5,
+) -> float:
+    """MaxSim using only the top-k query tokens with highest per-token max similarity.
+
+    Token vectors are L2-normalised so similarities are cosine in [-1, 1],
+    then mapped to [0, 1] via (cos+1)/2.
+    """
+    q = torch.nn.functional.normalize(query_emb.float(), dim=-1)
+    p = torch.nn.functional.normalize(proto_emb.float(), dim=-1)
+    sim = q @ p.T  # (n_q, n_p)
+    per_token_max = sim.max(dim=1).values  # (n_q,)
+    top_k = min(k, per_token_max.shape[0])
+    top_vals = per_token_max.topk(top_k).values
+    cos_mean = float(top_vals.mean().item())
+    return max(0.0, min(1.0, (cos_mean + 1.0) / 2.0))
+
+
+def scores_per_label_text_maxsim_top_tokens(
+    query_emb: Optional[torch.Tensor],
+    proto_embs: Sequence[Optional[torch.Tensor]],
+    proto_labels: list[str],
+    labels: Iterable[str],
+    topk_tokens: int = 5,
+) -> dict[str, float]:
+    """Per label: MaxSim with top-k query tokens, top-1 prototype score."""
+    out: dict[str, float] = {}
+    if query_emb is None:
+        return {lab: 0.0 for lab in labels}
+    for lab in labels:
+        ps = [e for e, lb in zip(proto_embs, proto_labels, strict=True) if lb == lab and e is not None]
+        if not ps:
+            out[lab] = 0.0
+            continue
+        scores = [_maxsim_top_k_query_tokens(query_emb, p, k=topk_tokens) for p in ps]
+        out[lab] = max(scores)  # top-1 prototype
+    return out
+
+
 def fuse_image_text_intrinsic(
     scores_img: dict[str, float],
     scores_txt: Optional[dict[str, float]],
@@ -423,7 +465,7 @@ def classify_triple(
     model: ColQwen3_5,
     w_img: float = 0.7,
     text_max_chars: int = DEFAULT_TEXT_CHARS,
-    batch_size: int = 4,
+    batch_size: int = 5,
     proto_text_embs: Optional[list[Optional[torch.Tensor]]] = None,
     label_score_agg: Literal["max", "topk_mean"] = "topk_mean",
     label_score_topk: int = 3,
@@ -559,19 +601,31 @@ def classify_page(
     model: ColQwen3_5,
     w_img: float = 0.7,
     text_max_chars: int = DEFAULT_TEXT_CHARS,
-    batch_size: int = 4,
+    batch_size: int = 5,
     proto_text_embs: Optional[list[Optional[torch.Tensor]]] = None,
     pred_from: Literal["image", "text", "fused"] = "image",
     label_score_agg: Literal["max", "topk_mean"] = "topk_mean",
     label_score_topk: int = 3,
     score_style: ScoreStyle = "colpali",
-) -> tuple[str, dict[str, float], dict[str, float], dict[str, float], str, str, str]:
+) -> tuple[
+    str,
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+    str,
+    str,
+    str,
+    torch.Tensor,
+    Optional[torch.Tensor],
+]:
     """
     Returns predicted label, fused scores, raw image scores, raw text scores (or empty),
-    pred_img, pred_fused, pred_txt.
+    pred_img, pred_fused, pred_txt, query image embedding, optional query text embedding.
 
     ``pred_from``: ``image`` = MaxSim ảnh; ``text`` = MaxSim nhánh text (prototype text);
     ``fused`` = sau khi gộp ảnh+text. Chế độ ``image`` không embed query text (nhanh hơn).
+
+    The final two tensors are for re-use (e.g. label_2 / position scoring) without a second image encode.
     """
     q_img = embed_images(model, processor, [query_image], device=device, batch_size=batch_size)[0]
 
@@ -589,7 +643,7 @@ def classify_page(
         if pred_from == "image":
             fused = dict(sim_img)
             pred_fused = max(fused, key=fused.get)
-            return pred_img, fused, sim_img, {}, pred_img, pred_fused, pred_img
+            return pred_img, fused, sim_img, {}, pred_img, pred_fused, pred_img, q_img, None
 
         t = truncate_text(query_text, text_max_chars)
         q_txt_list = embed_query_texts(model, processor, [t], device=device, batch_size=1)
@@ -612,7 +666,7 @@ def classify_page(
             pred = pred_txt
         else:
             pred = pred_fused
-        return pred, fused, sim_img, sim_txt, pred_img, pred_fused, pred_txt
+        return pred, fused, sim_img, sim_txt, pred_img, pred_fused, pred_txt, q_img, q_txt
 
     sim_img = scores_per_label(
         processor,
@@ -629,7 +683,7 @@ def classify_page(
     if pred_from == "image":
         fused = fuse_image_text_scores(sim_img, None, 1.0)
         pred_fused = max(fused, key=fused.get)
-        return pred_img, fused, sim_img, {}, pred_img, pred_fused, pred_img
+        return pred_img, fused, sim_img, {}, pred_img, pred_fused, pred_img, q_img, None
 
     t = truncate_text(query_text, text_max_chars)
     q_txt_list = embed_query_texts(model, processor, [t], device=device, batch_size=1)
@@ -660,7 +714,143 @@ def classify_page(
     else:
         pred = pred_fused
 
-    return pred, fused, sim_img, sim_txt, pred_img, pred_fused, pred_txt
+    return pred, fused, sim_img, sim_txt, pred_img, pred_fused, pred_txt, q_img, q_txt
+
+
+@torch.inference_mode()
+def predict_position_colpali(
+    processor: ColQwen3_5Processor,
+    device: str,
+    query_image_emb: torch.Tensor,
+    query_text_emb: Optional[torch.Tensor],
+    proto_embs: Sequence[Optional[torch.Tensor]],
+    proto_labels_2: list[str],
+    model: ColQwen3_5,
+    w_img: float = 0.7,
+    proto_text_embs: Optional[Sequence[Optional[torch.Tensor]]] = None,
+    pred_from: Literal["image", "text", "fused"] = "fused",
+    label_score_agg: Literal["max", "topk_mean"] = "topk_mean",
+    label_score_topk: int = 3,
+) -> dict[str, Any]:
+    """Position (label_2: start/mid/end/none) using the same colpali + branch min–max fusion as ``classify_page``."""
+    sim_img_pos = scores_per_label(
+        processor,
+        query_image_emb,
+        list(proto_embs),
+        proto_labels_2,
+        POSITION_LABELS,
+        device=device,
+        label_score_agg=label_score_agg,
+        label_score_topk=label_score_topk,
+    )
+
+    if pred_from == "image" or query_text_emb is None:
+        fused_pos = fuse_image_text_scores(sim_img_pos, None, 1.0)
+        pred_label_2 = max(fused_pos, key=fused_pos.get)
+        return {
+            "pred_label_2": pred_label_2,
+            "fused_pos": fused_pos,
+            "sim_img_pos": sim_img_pos,
+            "sim_txt_pos": {},
+        }
+
+    proto_for_txt = list(proto_text_embs) if proto_text_embs is not None else list(proto_embs)
+    sim_txt_pos = scores_per_label(
+        processor,
+        query_text_emb,
+        proto_for_txt,
+        proto_labels_2,
+        POSITION_LABELS,
+        device=device,
+        label_score_agg=label_score_agg,
+        label_score_topk=label_score_topk,
+    )
+    txt_for_fuse = sim_txt_pos if _text_scores_usable(sim_txt_pos) else None
+    fused_pos = fuse_image_text_scores(
+        sim_img_pos,
+        txt_for_fuse,
+        w_img=w_img if txt_for_fuse is not None else 1.0,
+    )
+    pred_label_2 = max(fused_pos, key=fused_pos.get)
+    return {
+        "pred_label_2": pred_label_2,
+        "fused_pos": fused_pos,
+        "sim_img_pos": sim_img_pos,
+        "sim_txt_pos": sim_txt_pos,
+    }
+
+
+@torch.inference_mode()
+def classify_page_with_position(
+    processor: ColQwen3_5Processor,
+    device: str,
+    query_image: Image.Image,
+    query_text: str,
+    proto_embs: list[torch.Tensor],
+    proto_labels: list[str],
+    proto_labels_2: list[str],
+    model: ColQwen3_5,
+    w_img: float = 0.7,
+    text_max_chars: int = DEFAULT_TEXT_CHARS,
+    batch_size: int = 5,
+    proto_text_embs: Optional[list[Optional[torch.Tensor]]] = None,
+    topk_tokens: int = 5,
+) -> dict[str, Any]:
+    """Classify page for both document type (label) and position (label_2).
+
+    Image branch: intrinsic top-1 prototype per group.
+    Text branch: MaxSim top-k tokens, top-1 prototype per group.
+    Fusion: weighted sum without per-branch min-max.
+    """
+    q_img = embed_images(model, processor, [query_image], device=device, batch_size=batch_size)[0]
+
+    sim_img = scores_per_label_image_intrinsic(
+        processor, q_img, proto_embs, proto_labels, ORDERED_LABELS, device=device, topk=1,
+    )
+    sim_img_pos = scores_per_label_image_intrinsic(
+        processor, q_img, proto_embs, proto_labels_2, POSITION_LABELS, device=device, topk=1,
+    )
+    pred_img = max(sim_img, key=sim_img.get)
+
+    t = truncate_text(query_text, text_max_chars)
+    q_txt_list = embed_query_texts(model, processor, [t], device=device, batch_size=1)
+    q_txt = q_txt_list[0]
+
+    proto_for_txt = proto_text_embs if proto_text_embs is not None else proto_embs
+
+    sim_txt: dict[str, float] = {}
+    sim_txt_pos: dict[str, float] = {}
+    if q_txt is not None:
+        sim_txt = scores_per_label_text_maxsim_top_tokens(
+            q_txt, proto_for_txt, proto_labels, ORDERED_LABELS, topk_tokens=topk_tokens,
+        )
+        sim_txt_pos = scores_per_label_text_maxsim_top_tokens(
+            q_txt, proto_for_txt, proto_labels_2, POSITION_LABELS, topk_tokens=topk_tokens,
+        )
+
+    txt_ok = _text_scores_usable(sim_txt)
+    fused = fuse_image_text_intrinsic(sim_img, sim_txt if txt_ok else None, w_img)
+    fused_pos = fuse_image_text_intrinsic(
+        sim_img_pos, sim_txt_pos if _text_scores_usable(sim_txt_pos) else None, w_img,
+    )
+
+    pred_label = max(fused, key=fused.get)
+    pred_label_2 = max(fused_pos, key=fused_pos.get)
+    pred_txt = _pred_from_txt(sim_txt, pred_img)
+
+    return {
+        "pred_label": pred_label,
+        "pred_label_2": pred_label_2,
+        "pred_img": pred_img,
+        "pred_fused": pred_label,
+        "pred_txt": pred_txt,
+        "fused": fused,
+        "sim_img": sim_img,
+        "sim_txt": sim_txt,
+        "fused_pos": fused_pos,
+        "sim_img_pos": sim_img_pos,
+        "sim_txt_pos": sim_txt_pos,
+    }
 
 
 def save_index(

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from classifyrag.colsmol_scorer import load_index, load_model
 from classifyrag.llm_keywords import DEFAULT_VLM_MODEL
+from classifyrag.postprocess_split import group_by_position
 from classifyrag.web_runner import ClassifyRunConfig, iter_classify_rows
 
 
@@ -45,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="Only classify the first N pages (0-based: pages 0..N-1). Default: all pages.",
     )
-    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=5)
     p.add_argument("--device", type=str, default=None)
     p.add_argument(
         "--ocr",
@@ -62,8 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--vlm-keywords",
         action="store_true",
-        help="When page has no usable text (typical for scans), run a vision LLM on the page image to produce keywords for the retriever text branch (see --vlm-model). "
-        "For --mode fused, use with --vlm-always if index used VLM on every page.",
+        help="When page has no usable text, run VLM: outputs the fixed token ``blank`` (same as blank index), matching blank prototypes. "
+        "When the page has PDF/OCR text, VLM uses the structural keyword prompt. "
+        "Use --vlm-always to run VLM on every page (non-empty pages still get the structural prompt).",
     )
     p.add_argument("--vlm-model", type=str, default=DEFAULT_VLM_MODEL, help="Hugging Face model id for VLM keywords.")
     p.add_argument("--vlm-device", type=str, default=None, help="Device for VLM (default: same as CUDA if available else cpu).")
@@ -71,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--vlm-keyword-count",
         type=int,
-        default=5,
+        default=10,
         help="Max distinctive VLM keywords when --vlm-keywords. 0 = legacy long list.",
     )
     p.add_argument(
@@ -104,30 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         default="colpali",
         help="colpali=late-interaction on text + branch min-max fusion (default). "
         "intrinsic=image: top-k MaxSim mean / num_query_patches → [0,1]; "
-        "text: mean-pool embeddings, cosine→[0,1], top-k mean; fuse without branch min-max. "
-        "Use --other-threshold ~0.5–0.9 on fused in intrinsic mode.",
-    )
-    p.add_argument(
-        "--other-threshold",
-        type=float,
-        default=None,
-        help="Top-1 score threshold on the branch used for scoring (see fused note below). "
-        "If top-1 is below this value, label becomes 'other'. Often too weak alone in fused mode "
-        "because fused scores are min-max normalized per page. Combine with --other-min-margin-norm.",
-    )
-    p.add_argument(
-        "--other-min-margin-norm",
-        type=float,
-        default=None,
-        metavar="M",
-        help="Also predict 'other' when margin_norm (top1-top2 gap normalized in-page) is below M — "
-        "catches ambiguous pages where 4 classes are close. Try 0.05–0.12 on validation.",
-    )
-    p.add_argument(
-        "--other-label",
-        type=str,
-        default="other",
-        help="Label name used when --other-threshold triggers (default: other).",
+        "text: mean-pool embeddings, cosine→[0,1], top-k mean; fuse without branch min-max.",
     )
     args = p.parse_args(argv)
 
@@ -158,9 +137,6 @@ def main(argv: list[str] | None = None) -> int:
         vlm_keyword_count=args.vlm_keyword_count,
         vlm_always=args.vlm_always,
         characteristic_text=args.characteristic_text,
-        other_threshold=args.other_threshold,
-        other_min_margin_norm=args.other_min_margin_norm,
-        other_label=args.other_label,
         label_score_agg=args.label_score_agg,
         label_score_topk=args.label_score_topk,
         score_style=args.score_style,
@@ -193,35 +169,32 @@ def main(argv: list[str] | None = None) -> int:
                 "top1_score_image",
                 "top1_score_fused",
                 "margin_norm_fused",
-                "other_threshold",
-                "other_min_margin_norm",
-                "other_triggered_vlm_text",
-                "other_triggered_image",
-                "other_triggered_fused",
-                "other_triggered_fused_top1",
-                "other_triggered_fused_margin",
             )
         else:
             summary_fields = (
                 "page_index",
                 "predicted_label",
+                "predicted_label_2",
                 "predicted_label_base",
                 "top1_score",
                 "top2_score",
                 "margin_top1_top2",
                 "margin_norm",
                 "z_gap_top1_top2",
-                "other_threshold",
-                "other_min_margin_norm",
-                "other_triggered",
-                "other_triggered_top1",
-                "other_triggered_margin_norm",
             )
         with args.summary.open("w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=summary_fields)
             w.writeheader()
             for r in rows:
                 w.writerow({k: r.get(k, "") for k in summary_fields})
+
+    # Document-level grouping based on label_2 (start/mid/end)
+    has_label_2 = any(r.get("predicted_label_2") for r in rows)
+    if has_label_2:
+        docs = group_by_position(rows)
+        docs_path = args.output.with_name(args.output.stem + "_docs.json")
+        docs_path.write_text(json.dumps(docs, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Wrote {len(docs)} document groups to {docs_path}")
 
     print(f"Wrote {len(rows)} rows to {args.output}")
     if args.summary is not None:

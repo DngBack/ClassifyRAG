@@ -12,12 +12,15 @@ from classifyrag.characteristic_text import apply_characteristic_text
 from classifyrag.colsmol_scorer import (
     PrototypeIndex,
     classify_page,
+    classify_page_with_position,
     classify_triple,
     embed_images,
-    predict_with_other,
+    predict_position_colpali,
     score_diagnostics,
+    softmax_scores,
 )
-from classifyrag.llm_keywords import DEFAULT_VLM_MODEL, keywords_from_image_vlm
+from classifyrag.labels import position_key_for_manifest
+from classifyrag.llm_keywords import DEFAULT_VLM_MODEL, keywords_blank_page_vlm, keywords_from_image_vlm
 from classifyrag.pdf_pages import iter_pdf_pages
 
 from classifyrag.blank_page import BlankPageIndex, blank_scores
@@ -29,13 +32,38 @@ def _has_usable_scores(scores: dict[str, float]) -> bool:
     return any(math.isfinite(v) for v in scores.values()) if scores else False
 
 
+def _row_text_source(page_text_source: str, query_text_kind: str) -> str:
+    """CSV ``text_source``: PDF layer is native/ocr/empty; VLM query string → ``vlm``."""
+    if query_text_kind in (
+        "vlm_keywords",
+        "vlm_keywords_characteristic",
+        "vlm_blank",
+        "vlm_blank_characteristic",
+    ):
+        return "vlm"
+    return page_text_source
+
+
+def _pred_probs_conf(scores: dict[str, float]) -> tuple[str, dict[str, float], float]:
+    """Argmax on raw scores + softmax probs for logging (no ``other`` threshold/margin)."""
+    probs = softmax_scores(scores)
+    diag = score_diagnostics(scores)
+    label = str(diag["top1_label"])
+    if not label and scores:
+        finite = {k: v for k, v in scores.items() if math.isfinite(v)}
+        if finite:
+            label = max(finite, key=finite.get)
+    conf = float(diag["top1_score"])
+    return label, probs, conf
+
+
 @dataclass
 class ClassifyRunConfig:
     mode: str
     w_img: float = 0.7
     dpi: float = 144.0
     max_pages: Optional[int] = None
-    batch_size: int = 4
+    batch_size: int = 5
     ocr: bool = False
     ocr_dpi: int = 150
     ocr_lang: str = "vie+eng"
@@ -43,13 +71,9 @@ class ClassifyRunConfig:
     vlm_model: str = DEFAULT_VLM_MODEL
     vlm_device: Optional[str] = None
     vlm_max_tokens: int = 256
-    vlm_keyword_count: int = 5
+    vlm_keyword_count: int = 10
     vlm_always: bool = False
     characteristic_text: bool = False
-    other_threshold: Optional[float] = None
-    #: If set, predict ``other`` when ``margin_norm`` on the ``chosen_scores`` branch is below this (ambiguous 4-way).
-    other_min_margin_norm: Optional[float] = None
-    other_label: str = "other"
     label_score_agg: Literal["max", "topk_mean"] = "topk_mean"
     label_score_topk: int = 3
     #: colpali = legacy MaxSim + branch min-max; intrinsic = image norm01 + pooled cosine text + fuse without branch min-max
@@ -83,28 +107,51 @@ def iter_classify_rows(
         need_vlm_for_fused = cfg.vlm_keywords and (cfg.vlm_always or not page.text.strip())
         need_vlm_for_compare = cfg.mode == "compare"
         need_vlm_for_text_mode = cfg.mode == "text"
+        page_has_no_text = not page.text.strip()
 
         if need_vlm_for_fused or need_vlm_for_compare or need_vlm_for_text_mode:
-            try:
-                kw = keywords_from_image_vlm(
-                    page.image,
-                    model_id=cfg.vlm_model,
-                    device=cfg.vlm_device,
-                    max_new_tokens=cfg.vlm_max_tokens,
-                    max_keywords=cfg.vlm_keyword_count if cfg.vlm_keyword_count > 0 else None,
-                )
-            except Exception as e:
-                logger.warning("VLM keywords failed page %s: %s", page.page_index, e)
-                kw = ""
-            vlm_raw = kw.strip()
-            if need_vlm_for_fused and vlm_raw:
-                query_text = kw
-                query_text_kind = "vlm_keywords"
-                vlm_snippet = kw[:500]
-            elif need_vlm_for_fused and not query_text.strip():
-                query_text_kind = "empty"
-            if need_vlm_for_compare or need_vlm_for_text_mode:
-                vlm_snippet = (kw or "")[:500]
+            kw = ""
+            if page_has_no_text:
+                try:
+                    kw = keywords_blank_page_vlm(
+                        page.image,
+                        model_id=cfg.vlm_model,
+                        device=cfg.vlm_device,
+                        max_new_tokens=min(64, cfg.vlm_max_tokens),
+                    )
+                except Exception as e:
+                    logger.warning("VLM blank page failed page %s: %s", page.page_index, e)
+                    kw = "blank"
+                vlm_raw = kw.strip() or "blank"
+                if need_vlm_for_fused and vlm_raw:
+                    query_text = vlm_raw
+                    query_text_kind = "vlm_blank"
+                    vlm_snippet = vlm_raw[:500]
+                elif need_vlm_for_fused:
+                    query_text_kind = "empty"
+                if need_vlm_for_compare or need_vlm_for_text_mode:
+                    vlm_snippet = vlm_raw[:500]
+            else:
+                try:
+                    kw = keywords_from_image_vlm(
+                        page.image,
+                        model_id=cfg.vlm_model,
+                        device=cfg.vlm_device,
+                        max_new_tokens=cfg.vlm_max_tokens,
+                        max_keywords=cfg.vlm_keyword_count if cfg.vlm_keyword_count > 0 else None,
+                    )
+                except Exception as e:
+                    logger.warning("VLM keywords failed page %s: %s", page.page_index, e)
+                    kw = ""
+                vlm_raw = kw.strip()
+                if need_vlm_for_fused and vlm_raw:
+                    query_text = kw
+                    query_text_kind = "vlm_keywords"
+                    vlm_snippet = kw[:500]
+                elif need_vlm_for_fused and not query_text.strip():
+                    query_text_kind = "empty"
+                if need_vlm_for_compare or need_vlm_for_text_mode:
+                    vlm_snippet = (kw or "")[:500]
 
         query_text_fused = apply_characteristic_text(query_text, cfg.characteristic_text)
         char_flag = cfg.characteristic_text
@@ -113,8 +160,12 @@ def iter_classify_rows(
                 query_text_kind = "characteristic_text"
             elif query_text_kind == "vlm_keywords":
                 query_text_kind = "vlm_keywords_characteristic"
+            elif query_text_kind == "vlm_blank":
+                query_text_kind = "vlm_blank_characteristic"
 
         query_text_vlm_only = apply_characteristic_text(vlm_raw, char_flag)
+
+        text_source = _row_text_source(page.text_source, query_text_kind)
 
         if cfg.mode == "compare":
             triple = classify_triple(
@@ -137,36 +188,11 @@ def iter_classify_rows(
             sim_img = triple["sim_img"]
             sim_txt_vlm = triple["sim_txt_vlm"]
             sim_txt_fused = triple["sim_txt_fused"]
-            pred_v, probs_v, conf_v = predict_with_other(
-                sim_txt_vlm if sim_txt_vlm else sim_img,
-                other_threshold=cfg.other_threshold,
-                other_label=cfg.other_label,
-            )
-            pred_i, probs_i, conf_i = predict_with_other(
-                sim_img,
-                other_threshold=cfg.other_threshold,
-                other_label=cfg.other_label,
-            )
-            pred_f, probs_f, conf_f = predict_with_other(
-                fused,
-                other_threshold=cfg.other_threshold,
-                other_label=cfg.other_label,
-            )
-            pred_f_after_top1 = pred_f
+            pred_v, probs_v, conf_v = _pred_probs_conf(sim_txt_vlm if sim_txt_vlm else sim_img)
+            pred_i, probs_i, conf_i = _pred_probs_conf(sim_img)
+            pred_f, probs_f, conf_f = _pred_probs_conf(fused)
             diag_f = score_diagnostics(fused)
             margin_f = float(diag_f["margin_norm"])
-            pred_f_base = triple["pred_fused"]
-            other_f_margin = False
-            if (
-                pred_f != cfg.other_label
-                and cfg.other_min_margin_norm is not None
-                and margin_f < cfg.other_min_margin_norm
-            ):
-                pred_f = cfg.other_label
-                other_f_margin = True
-            other_f_top1 = bool(
-                pred_f_after_top1 == cfg.other_label and pred_f_base != cfg.other_label
-            )
             row = {
                 "page_index": page.page_index,
                 "mode": "compare",
@@ -174,7 +200,7 @@ def iter_classify_rows(
                 "predicted_label_vlm_text": pred_v,
                 "predicted_label_image": pred_i,
                 "predicted_label_fused": pred_f,
-                "text_source": page.text_source,
+                "text_source": text_source,
                 "query_text_kind": query_text_kind,
                 "text_chars": len(page.text),
                 "text_empty": not bool(page.text.strip()),
@@ -182,22 +208,7 @@ def iter_classify_rows(
                 "top1_score_vlm_text": round(conf_v, 6),
                 "top1_score_image": round(conf_i, 6),
                 "top1_score_fused": round(conf_f, 6),
-                "other_threshold": cfg.other_threshold if cfg.other_threshold is not None else "",
-                "other_triggered_vlm_text": bool(
-                    cfg.other_threshold is not None
-                    and pred_v == cfg.other_label
-                    and triple["pred_vlm_text"] != cfg.other_label
-                ),
-                "other_triggered_image": bool(
-                    cfg.other_threshold is not None
-                    and pred_i == cfg.other_label
-                    and triple["pred_image"] != cfg.other_label
-                ),
-                "other_triggered_fused": bool(pred_f == cfg.other_label and pred_f_base != cfg.other_label),
-                "other_triggered_fused_top1": other_f_top1,
-                "other_triggered_fused_margin": other_f_margin,
                 "margin_norm_fused": round(margin_f, 6),
-                "other_min_margin_norm": cfg.other_min_margin_norm if cfg.other_min_margin_norm is not None else "",
                 "score_style": cfg.score_style,
             }
             for k, v in fused.items():
@@ -217,10 +228,79 @@ def iter_classify_rows(
             rows.append(row)
             continue
 
-        pred_from = "image" if cfg.mode == "image" else ("text" if cfg.mode == "text" else "fused")
         query_for_single = query_text_vlm_only if cfg.mode == "text" else query_text_fused
 
-        pred, fused, sim_img, sim_txt, pred_img, pred_fused, pred_txt = classify_page(
+        # --- intrinsic v2: image top-1, text MaxSim top-5, label_2 prediction ---
+        if cfg.score_style == "intrinsic":
+            proto_labels_2 = [position_key_for_manifest(m) for m in idx.manifest]
+            res = classify_page_with_position(
+                processor=processor,
+                device=device,
+                query_image=page.image,
+                query_text=query_for_single,
+                proto_embs=idx.image_embs,
+                proto_labels=proto_labels,
+                proto_labels_2=proto_labels_2,
+                model=model,
+                w_img=cfg.w_img,
+                batch_size=cfg.batch_size,
+                proto_text_embs=idx.text_embs,
+                topk_tokens=5,
+            )
+            fused = res["fused"]
+            sim_img = res["sim_img"]
+            sim_txt = res["sim_txt"]
+            pred_img = res["pred_img"]
+            pred_fused = res["pred_fused"]
+            pred_txt = res["pred_txt"]
+            pred_label_2 = res["pred_label_2"]
+            fused_pos = res["fused_pos"]
+
+            chosen_scores = fused if _has_usable_scores(sim_txt) else sim_img
+            pred_final, probs, confidence = _pred_probs_conf(chosen_scores)
+            diag = score_diagnostics(chosen_scores)
+
+            row = {
+                "page_index": page.page_index,
+                "mode": cfg.mode,
+                "predicted_label": pred_final,
+                "predicted_label_2": pred_label_2,
+                "predicted_label_image": pred_img,
+                "predicted_label_fused": pred_fused,
+                "predicted_label_text": pred_txt,
+                "predicted_label_base": res["pred_label"],
+                "text_source": text_source,
+                "query_text_kind": query_text_kind,
+                "text_chars": len(page.text),
+                "text_empty": not bool(page.text.strip()),
+                "vlm_keywords_snippet": vlm_snippet,
+                "top1_score": round(confidence, 6),
+                "top1_label_by_score": str(diag["top1_label"]),
+                "top2_score": round(float(diag["top2_score"]), 6),
+                "margin_top1_top2": round(float(diag["margin_top1_top2"]), 6),
+                "margin_norm": round(float(diag["margin_norm"]), 6),
+                "z_gap_top1_top2": round(float(diag["z_gap_top1_top2"]), 6),
+                "label_score_agg": cfg.label_score_agg,
+                "label_score_topk": cfg.label_score_topk,
+                "score_style": cfg.score_style,
+            }
+            for k, v in fused.items():
+                row[f"fused_{k}"] = round(v, 6)
+            for k, v in sim_img.items():
+                row[f"img_{k}"] = round(v, 4)
+            for k, v in sim_txt.items():
+                row[f"txt_{k}"] = round(v, 4)
+            for k, v in fused_pos.items():
+                row[f"pos_{k}"] = round(v, 6)
+            for k, v in probs.items():
+                row[f"prob_{k}"] = round(v, 6)
+            rows.append(row)
+            continue
+
+        # --- legacy colpali path + label_2 (position) same fusion as document label ---
+        pred_from = "image" if cfg.mode == "image" else ("text" if cfg.mode == "text" else "fused")
+
+        pred, fused, sim_img, sim_txt, pred_img, pred_fused, pred_txt, q_img, q_txt = classify_page(
             processor=processor,
             device=device,
             query_image=page.image,
@@ -237,45 +317,42 @@ def iter_classify_rows(
             score_style=cfg.score_style,
         )
 
-        # Threshold should be applied on raw branch scores:
-        # - image mode -> raw image scores
-        # - text mode -> raw text scores when available, otherwise raw image fallback
-        # - fused mode -> raw fused only when text branch is usable; otherwise raw image fallback
+        proto_labels_2 = [position_key_for_manifest(m) for m in idx.manifest]
+        pos_res = predict_position_colpali(
+            processor=processor,
+            device=device,
+            query_image_emb=q_img,
+            query_text_emb=q_txt,
+            proto_embs=idx.image_embs,
+            proto_labels_2=proto_labels_2,
+            model=model,
+            w_img=cfg.w_img,
+            proto_text_embs=idx.text_embs,
+            pred_from=pred_from,
+            label_score_agg=cfg.label_score_agg,
+            label_score_topk=cfg.label_score_topk,
+        )
+        pred_label_2 = str(pos_res["pred_label_2"])
+
         if cfg.mode == "text":
             chosen_scores = sim_txt if _has_usable_scores(sim_txt) else sim_img
         elif cfg.mode == "fused":
             chosen_scores = fused if _has_usable_scores(sim_txt) else sim_img
         else:
             chosen_scores = sim_img
-        pred_with_other, probs, confidence = predict_with_other(
-            chosen_scores, other_threshold=cfg.other_threshold, other_label=cfg.other_label
-        )
+        pred_final, probs, confidence = _pred_probs_conf(chosen_scores)
         diag = score_diagnostics(chosen_scores)
-        margin_n = float(diag["margin_norm"])
-        pred_final = pred_with_other
-        other_from_margin = False
-        if (
-            pred_final != cfg.other_label
-            and cfg.other_min_margin_norm is not None
-            and margin_n < cfg.other_min_margin_norm
-        ):
-            pred_final = cfg.other_label
-            other_from_margin = True
-        other_from_top1 = bool(
-            cfg.other_threshold is not None
-            and pred_with_other == cfg.other_label
-            and pred != cfg.other_label
-        )
 
         row = {
             "page_index": page.page_index,
             "mode": cfg.mode,
             "predicted_label": pred_final,
+            "predicted_label_2": pred_label_2,
             "predicted_label_image": pred_img,
             "predicted_label_fused": pred_fused,
             "predicted_label_text": pred_txt,
             "predicted_label_base": pred,
-            "text_source": page.text_source,
+            "text_source": text_source,
             "query_text_kind": query_text_kind,
             "text_chars": len(page.text),
             "text_empty": not bool(page.text.strip()),
@@ -286,11 +363,6 @@ def iter_classify_rows(
             "margin_top1_top2": round(float(diag["margin_top1_top2"]), 6),
             "margin_norm": round(float(diag["margin_norm"]), 6),
             "z_gap_top1_top2": round(float(diag["z_gap_top1_top2"]), 6),
-            "other_triggered": bool(pred_final == cfg.other_label and pred != cfg.other_label),
-            "other_triggered_top1": other_from_top1,
-            "other_triggered_margin_norm": other_from_margin,
-            "other_min_margin_norm": cfg.other_min_margin_norm if cfg.other_min_margin_norm is not None else "",
-            "other_threshold": cfg.other_threshold if cfg.other_threshold is not None else "",
             "label_score_agg": cfg.label_score_agg,
             "label_score_topk": cfg.label_score_topk,
             "score_style": cfg.score_style,
@@ -301,6 +373,8 @@ def iter_classify_rows(
             row[f"img_{k}"] = round(v, 4)
         for k, v in sim_txt.items():
             row[f"txt_{k}"] = round(v, 4)
+        for k, v in pos_res["fused_pos"].items():
+            row[f"pos_{k}"] = round(v, 6)
         for k, v in probs.items():
             row[f"prob_{k}"] = round(v, 6)
         rows.append(row)
@@ -312,7 +386,7 @@ class BlankRunConfig:
     max_pages: int = 500
     threshold: float = 0.85
     dpi: float = 144.0
-    batch_size: int = 4
+    batch_size: int = 5
     gt_ocr: bool = False
     ocr_dpi: int = 150
     ocr_lang: str = "vie+eng"
