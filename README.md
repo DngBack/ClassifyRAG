@@ -10,6 +10,26 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+### Giao diện Streamlit
+
+Model ColQwen **chỉ được nạp** khi bạn bấm chạy (Phân loại / Trang trắng); tab **Thời gian chạy** ghi lại thời gian nạp model và xử lý PDF trong session.
+
+```bash
+cd /path/to/ClassifyRAG
+./scripts/run_streamlit.sh
+```
+
+Script sẽ tự chọn cổng trống trong dải `7860-7870`. Có thể ép cổng cụ thể:
+
+```bash
+./scripts/run_streamlit.sh 7865
+```
+
+Trong tab **Phân loại**, phần **Rule split sau classify** có bộ tách hậu xử lý (không dùng LLM):
+- Mặc định tách 1 trang/doc cho mọi nhãn.
+- Với các nhãn cho phép ghép 2 trang, hệ thống xét cosine của cặp trang liên tiếp trên vector score (`fused_*` hoặc `img_*`).
+- Có tuỳ chọn **anti-merge guard**: chỉ ghép nếu `cos(i,i+1) - max(cos(i-1,i), cos(i+1,i+2)) >= delta` để giảm ghép nhầm các trang đơn có mẫu quá giống nhau.
+
 - **GPU** khuyến nghị cho ColQwen3.5 (khoảng ~4.5B tham số).
 - **OCR (Tesseract)** tùy chọn: cần khi PDF scan không có lớp text (`classify_pdf --ocr`, `eval_blank_pdf --gt-ocr`). Ví dụ Ubuntu: `sudo apt install tesseract-ocr tesseract-ocr-vie tesseract-ocr-eng`.
 
@@ -45,7 +65,7 @@ Các tùy chọn quan trọng:
 
 - `--dpi` — DPI render trang (mặc định 144).
 - `--ocr` — bật OCR khi không có text layer (cần Tesseract).
-- `--vlm-keywords` — sinh từ khóa bằng vision LLM khi thiếu text (nặng, cần model HF).
+- `--vlm-keywords` — sinh từ khóa bằng vision LLM khi thiếu text (nặng, cần model HF). Kèm `--vlm-keyword-count` (mặc định 5) để chỉ giữ vài từ khóa đặc trưng; `0` = prompt dài hơn, khoảng 8–15 cụm đặc trưng (không dump cả form).
 - `--characteristic-text` — chỉ giữ tiêu đề/nhãn trường cho nhánh text (phù hợp form); dùng **cùng cờ** khi classify.
 
 ### Phân loại một PDF
@@ -63,6 +83,10 @@ python -m classifyrag.classify_pdf \
 - `--summary PATH` — thêm file CSV chỉ hai cột `page_index`, `predicted_label` (xem nhanh khi chưa có ground truth); `--output` vẫn là bản đầy đủ điểm số / debug.
 - `--mode image` (mặc định) — chỉ MaxSim ảnh. `text` — VLM trích keyword rồi so với prototype **text** (giống `build_index --vlm-keywords`). `fused` — gộp ảnh + text (text lấy từ PDF/OCR + `--vlm-keywords` / `--vlm-always` như pipeline hiện tại). `compare` — một lần chạy, CSV có ba nhãn: VLM-text | image | fused; `--summary` ghi bốn cột (page + ba nhãn).
 - `--ocr`, `--vlm-keywords`, `--characteristic-text` — giống logic lúc build index (nên **khớp** với cách đã build).
+- `--other-threshold` — gán `other` khi top-1 score trên **nhánh đang dùng để chấm** thấp hơn ngưỡng. Với `fused` + text usable, score đã min-max trong trang nên ngưỡng này **thường ít kích hoạt**; nên kết hợp `--other-min-margin-norm`.
+- `--other-min-margin-norm M` — gán `other` khi `margin_norm` (khoảng cách top1–top2 sau chuẩn hóa trong trang) **nhỏ hơn M** (trang mơ hồ, 4 lớp gần nhau). Thử 0.05–0.12 trên tập validation. CSV có `other_triggered_top1` / `other_triggered_margin_norm`.
+- `--label-score-agg topk_mean --label-score-topk 3` (mặc định) — tính điểm label bằng trung bình top-k prototype, giảm lệch khi số prototype mỗi nhãn không đều.
+- `--score-style intrinsic` — nhánh ảnh: trung bình top-k điểm MaxSim/trang prototype, chia cho số token ảnh query, clamp [0,1]; nhánh text: mean-pool embedding rồi cosine mapped [0,1], top-k mean/prototype; `fused_*` = cộng có trọng số **không** min-max từng nhánh. Mặc định `colpali` giữ hành vi cũ.
 
 ### Đánh giá nhanh trên thư mục mẫu
 

@@ -139,7 +139,7 @@ def score_blank_for_image(
     processor: ColQwen3_5Processor,
     device: str,
     blank_index: BlankPageIndex,
-    batch_size: int = 4,
+    batch_size: int = 5,
 ) -> tuple[float, float]:
     """
     Embed one page image and score against a blank reference index.
@@ -158,7 +158,7 @@ def build_blank_index_from_dir(
     *,
     model_id: str = DEFAULT_MODEL_ID,
     device: Optional[str] = None,
-    batch_size: int = 4,
+    batch_size: int = 5,
 ) -> BlankPageIndex:
     manifest, images = load_blank_sample_images(samples_dir)
     if not images:

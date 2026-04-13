@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--output", type=Path, default=Path("data/index/blank_prototypes.pt"), help="Output .pt index.")
     p.add_argument("--manifest-json", type=Path, default=Path("data/index/blank_manifest.json"))
     p.add_argument("--model-id", type=str, default=DEFAULT_MODEL_ID)
-    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=5)
     p.add_argument("--device", type=str, default=None, help="cuda:0 | cpu | mps (default: auto)")
     args = p.parse_args(argv)
 

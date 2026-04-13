@@ -1,0 +1,6 @@
+page_index,predicted_label,predicted_label_base,top1_score,top2_score,margin_top1_top2,margin_norm,z_gap_top1_top2,other_threshold,other_min_margin_norm,other_triggered,other_triggered_top1,other_triggered_margin_norm
+0,the_tiet_kiem_ban_sao,the_tiet_kiem_ban_sao,0.675576,0.666676,0.0089,0.079101,0.201168,,,False,False,False
+1,the_tiet_kiem_ban_sao,the_tiet_kiem_ban_sao,0.676315,0.663838,0.012476,0.116578,0.299999,,,False,False,False
+2,the_tiet_kiem_ban_sao,the_tiet_kiem_ban_sao,0.714994,0.701383,0.013611,0.104501,0.268862,,,False,False,False
+3,the_tiet_kiem_ban_sao,the_tiet_kiem_ban_sao,0.622947,0.613483,0.009464,0.39423,1.106268,,,False,False,False
+4,giay_gui_tien_tiet_kiem,giay_gui_tien_tiet_kiem,0.7243,0.718507,0.005793,0.032233,0.077525,,,False,False,False
